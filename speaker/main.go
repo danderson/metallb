@@ -15,13 +15,16 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io/ioutil"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 
 	"go.universe.tf/metallb/internal/bgp"
@@ -61,17 +64,19 @@ func main() {
 	prometheus.MustRegister(announcing)
 
 	var (
-		config     = flag.String("config", "config", "Kubernetes ConfigMap containing MetalLB's configuration")
-		namespace  = flag.String("namespace", os.Getenv("METALLB_NAMESPACE"), "config file and speakers namespace")
-		kubeconfig = flag.String("kubeconfig", "", "absolute path to the kubeconfig file (only needed when running outside of k8s)")
-		host       = flag.String("host", os.Getenv("METALLB_HOST"), "HTTP host address")
-		mlBindAddr = flag.String("ml-bindaddr", os.Getenv("METALLB_ML_BIND_ADDR"), "Bind addr for MemberList (fast dead node detection)")
-		mlBindPort = flag.String("ml-bindport", os.Getenv("METALLB_ML_BIND_PORT"), "Bind port for MemberList (fast dead node detection)")
-		mlLabels   = flag.String("ml-labels", os.Getenv("METALLB_ML_LABELS"), "Labels to match the speakers (for MemberList / fast dead node detection)")
-		mlSecret   = flag.String("ml-secret-key", os.Getenv("METALLB_ML_SECRET_KEY"), "Secret key for MemberList (fast dead node detection)")
-		myNode     = flag.String("node-name", os.Getenv("METALLB_NODE_NAME"), "name of this Kubernetes node (spec.nodeName)")
-		port       = flag.Int("port", 7472, "HTTP listening port")
-		logLevel   = flag.String("log-level", "info", fmt.Sprintf("log level. must be one of: [%s]", strings.Join(logging.Levels, ", ")))
+		config      = flag.String("config", "config", "Kubernetes ConfigMap containing MetalLB's configuration")
+		namespace   = flag.String("namespace", os.Getenv("METALLB_NAMESPACE"), "config file and speakers namespace")
+		kubeconfig  = flag.String("kubeconfig", "", "absolute path to the kubeconfig file (only needed when running outside of k8s)")
+		metricsHost = flag.String("metrics-host", os.Getenv("METALLB_METRICS_HOST"), "Bind address for Prometheus metrics")
+		metricsPort = flag.Int("metrics-port", 7472, "Bind port for Prometheus metrics")
+		mlBindAddr  = flag.String("ml-bindaddr", os.Getenv("METALLB_ML_BIND_ADDR"), "Bind addr for MemberList (fast dead node detection)")
+		mlBindPort  = flag.String("ml-bindport", os.Getenv("METALLB_ML_BIND_PORT"), "Bind port for MemberList (fast dead node detection)")
+		mlLabels    = flag.String("ml-labels", os.Getenv("METALLB_ML_LABELS"), "Labels to match the speakers (for MemberList / fast dead node detection)")
+		mlSecret    = flag.String("ml-secret-key", os.Getenv("METALLB_ML_SECRET_KEY"), "Secret key for MemberList (fast dead node detection)")
+		myNode      = flag.String("node-name", os.Getenv("METALLB_NODE_NAME"), "name of this Kubernetes node (spec.nodeName)")
+		statusHost  = flag.String("status-host", os.Getenv("METALLB_STATUS_HOST"), "Bind address for status endpoint")
+		statusPort  = flag.Int("status-port", 7473, "Bind port for status endpoint")
+		logLevel    = flag.String("log-level", "info", fmt.Sprintf("log level. must be one of: [%s]", strings.Join(logging.Levels, ", ")))
 	)
 	flag.Parse()
 
@@ -98,15 +103,6 @@ func main() {
 	}
 
 	stopCh := make(chan struct{})
-	go func() {
-		c1 := make(chan os.Signal, 1)
-		signal.Notify(c1, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
-		<-c1
-		level.Info(logger).Log("op", "shutdown", "msg", "starting shutdown")
-		signal.Stop(c1)
-		close(stopCh)
-	}()
-	defer level.Info(logger).Log("op", "shutdown", "msg", "done")
 
 	sList, err := speakerlist.New(logger, *myNode, *mlBindAddr, *mlBindPort, *mlSecret, *namespace, *mlLabels, stopCh)
 	if err != nil {
@@ -132,8 +128,8 @@ func main() {
 		Logger:        logger,
 		Kubeconfig:    *kubeconfig,
 
-		MetricsHost:   *host,
-		MetricsPort:   *port,
+		MetricsHost:   *metricsHost,
+		MetricsPort:   *metricsPort,
 		ReadEndpoints: true,
 
 		ServiceChanged: ctrl.SetBalancer,
@@ -147,11 +143,35 @@ func main() {
 	ctrl.client = client
 
 	sList.Start(client)
-	defer sList.Stop()
+
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	statusServer := serveStatus(logger, ctrl.protocols, *statusHost, *statusPort, &wg)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		c1 := make(chan os.Signal, 1)
+		signal.Notify(c1, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
+
+		<-c1
+		level.Info(logger).Log("op", "shutdown", "msg", "starting shutdown")
+		signal.Stop(c1)
+
+		close(stopCh)
+		sList.Stop()
+		if err = statusServer.Shutdown(context.TODO()); err != nil {
+			level.Info(logger).Log("op", "shutdown", "msg", "shutting down status endpoint", "error", err)
+		}
+	}()
 
 	if err := client.Run(stopCh); err != nil {
 		level.Error(logger).Log("op", "startup", "error", err, "msg", "failed to run k8s client")
 	}
+
+	wg.Wait()
+	level.Info(logger).Log("op", "shutdown", "msg", "done")
 }
 
 type controller struct {
@@ -374,6 +394,7 @@ type Protocol interface {
 	SetBalancer(log.Logger, string, net.IP, *config.Pool) error
 	DeleteBalancer(log.Logger, string, string) error
 	SetNode(log.Logger, *v1.Node) error
+	StatusHandler() func(w http.ResponseWriter, r *http.Request)
 }
 
 // Speakerlist represents a list of healthy speakers.

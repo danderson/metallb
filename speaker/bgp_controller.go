@@ -15,13 +15,16 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"reflect"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"go.universe.tf/metallb/internal/bgp"
@@ -46,6 +49,7 @@ type bgpController struct {
 	nodeLabels      labels.Set
 	cfg             *config.Config
 	peers           []*peer
+	peersLock       sync.Mutex
 	svcAds          map[string][]*bgp.Advertisement
 }
 
@@ -140,6 +144,9 @@ func (c *bgpController) syncPeers(l log.Logger) error {
 	if c.cfg == nil {
 		return nil
 	}
+
+	c.peersLock.Lock()
+	defer c.peersLock.Unlock()
 
 	// Merge static peers and discovered peers into a single slice representing
 	// the desired set of peers while ensuring we don't have two peers which
@@ -483,6 +490,59 @@ type statusPeer struct {
 	RouterID      net.IP
 	NodeSelectors []string
 	Password      string
+}
+
+func (c *bgpController) StatusHandler() func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		c.peersLock.Lock()
+		defer c.peersLock.Unlock()
+
+		// Copy peers slice. We want to redact BGP passwords without modifying
+		// the actual peers.
+		peers := []statusPeer{}
+
+		for _, p := range c.peers {
+			// Peers can be nil temporarily during reconciliation.
+			if p == nil {
+				continue
+			}
+
+			sp := statusPeer{
+				MyASN:    p.Cfg.MyASN,
+				ASN:      p.Cfg.ASN,
+				Addr:     p.Cfg.Addr,
+				Port:     p.Cfg.Port,
+				HoldTime: p.Cfg.HoldTime.String(),
+				RouterID: p.Cfg.RouterID,
+			}
+
+			for _, ns := range p.Cfg.NodeSelectors {
+				sp.NodeSelectors = append(sp.NodeSelectors, ns.String())
+			}
+
+			// Don't expose BGP passwords over the status endpoint.
+			if p.Cfg.Password != "" {
+				sp.Password = "REDACTED"
+			}
+
+			peers = append(peers, sp)
+		}
+
+		res := struct {
+			Peers []statusPeer
+		}{
+			Peers: peers,
+		}
+
+		j, err := json.MarshalIndent(res, "", "  ")
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to get status: %s", err), 500)
+			return
+		}
+		fmt.Fprint(w, string(j))
+	}
 }
 
 // parseNodePeer attempts to construct a BGP peer configuration from
