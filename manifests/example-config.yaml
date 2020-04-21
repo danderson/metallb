@@ -104,6 +104,43 @@ data:
         communities:
         - 64512:1
         - no-export
+    # (optional) Peer autodiscovery configuration. Allows discovering BGP
+    # peering configuration from node annotations and/or labels.
+    peer-autodiscovery:
+      # (optional) Default values to use for all discovered peers.
+      defaults:
+        my-asn: 100
+        peer-asn: 200
+        peer-address: 10.0.0.1
+        peer-port: 1179
+        hold-time: 180s
+        router-id: 10.0.0.2
+      # Tells MetalLB to discover BGP peers by looking for annotations on the
+      # Node object. One of 'from-annotations', 'from-labels' must be specified.
+      from-annotations:
+      - my-asn: example.com/my-asn
+        peer-asn: example.com/peer-asn
+        peer-address: example.com/peer-address
+        peer-port: example.com/peer-port
+        hold-time: example.com/hold-time
+        router-id: example.com/router-id
+      # Tells MetalLB to discover BGP peers by looking for labels on the Node
+      # object. One of 'from-annotations', 'from-labels' must be specified.
+      from-labels:
+      - my-asn: example.com/my-asn
+        peer-asn: example.com/peer-asn
+        peer-address: example.com/peer-address
+        peer-port: example.com/peer-port
+        hold-time: example.com/hold-time
+        router-id: example.com/router-id
+      # (optional) Discover node peers only on nodes matching these selectors.
+      node-selectors:
+      - match-labels:
+          node-type: ingress
+        match-expressions:
+        - key: beta.kubernetes.io/arch
+          operator: In
+          values: [amd64, arm]
     # (optional) BGP community aliases. Instead of using hard to
     # read BGP community numbers in address pool advertisement
     # configurations, you can define alias names here and use those
