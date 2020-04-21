@@ -274,6 +274,129 @@ more than one node because two nodes in a given network usually
 shouldn't have the same IP address.
 {{% /notice %}}
 
+### Peer autodiscovery
+
+In addition to configuring BGP peers statically using the `peers` configuration
+section, MetalLB supports peer autodiscovery using node annotations/labels.
+Peers configured in this way are called **node peers** because unlike
+statically-configured peers, node peers are always bound to a specific
+Kubernetes node.
+
+Peer autodiscovery is useful in cases where it is undesirable or impossible to
+maintain a static list of peers in the ConfigMap manually. It allows load
+balancing to continue functioning when adding and removing nodes and even when
+scaling clusters automatically in API-driven bare metal environments.
+
+Peer autodiscovery may be used in conjunction with static peer configuration.
+
+MetalLB discovers node peers by looking for
+[annotations](https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/)
+and/or
+[labels](https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/)
+on the `Node` object associated with the Kubernetes node which runs a MetalLB
+speaker pod and using their values to figure out the BGP configuration for node
+peers. The specific annotations or labels to look for are **configurable**.
+
+Following is a sample configuration which tells MetalLB to discover node peers
+using annotations:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  namespace: metallb-system
+  name: config
+data:
+  config: |
+    address-pools:
+    - name: default
+      protocol: bgp
+      addresses:
+      - 198.51.100.0/24
+    peer-autodiscovery:
+      from-annotations:
+      - my-asn: example.com/my-asn
+        peer-asn: example.com/peer-asn
+        peer-address: example.com/peer-address
+```
+
+The example above instructs MetalLB to try and discover a node peer for every
+node which runs a speaker pod. MetalLB will expect to find the value for the
+local ASN in an annotation called `example.com/my-asn`, the value for the
+remote ASN in an annotations called `example.com/peer-asn` and the value for
+the peer address in an annotation called `example.com/peer-address`. Therefore,
+the `Node` Kubernetes object must have these annotations with the correct
+values as in the following example:
+
+```yaml
+apiVersion: v1
+kind: Node
+metadata:
+  annotations:
+    example.com/my-asn: 64500
+    example.com/peer-asn: 64501
+    example.com/peer-address: 10.0.0.3
+```
+
+Similarly, the same behavior can be achieved using labels. The only difference
+is that we use `from-lables` in place of `from-annotations`:
+
+```yaml
+peer-autodiscovery:
+  from-labels:
+  - my-asn: example.com/my-asn
+    peer-asn: example.com/peer-asn
+    peer-address: example.com/peer-address
+```
+
+MetalLB can be configured to discover multiple node peers by specifying
+multiple sets of annotations/labels in the autodiscovery configuration:
+
+```yaml
+peer-autodiscovery:
+  from-annotations:
+  - my-asn: example.com/p1-my-asn
+    peer-asn: example.com/p1-peer-asn
+    peer-address: example.com/p1-peer-address
+  - my-asn: example.com/p2-my-asn
+    peer-asn: example.com/p2-peer-asn
+    peer-address: example.com/p2-peer-address
+```
+
+{{% notice note %}}
+BGP authentication currently isn't supported for node peers. Specifying
+clear-text passwords in `Node` objects is dangerous, and until a more secure
+solution for handling passwords is introduced, peer autodiscovery can only work
+in environments where BGP authentication isn't configured.
+{{% /notice %}}
+
+Setting the right annotations/labels is **out of scope** for MetalLB. `Node`
+objects can be annotated or labeled in a variety of ways, and it is assumed
+that there is some external mechanism that puts the BGP configuration in
+annotations/labels for MetalLB to consume. Following are some common examples
+of such mechanisms:
+
+- A
+  [Cloud Controller Manager](https://kubernetes.io/docs/tasks/administer-cluster/running-cloud-controller/)
+  can be used to automatically populate annotations/labels with BGP-related
+  information retrieved from a cloud provider's API.
+- The `--node-labels` kubelet flag can be used to register nodes with labels.
+- The tooling used to bootstrap a Kubernetes cluster may be able to set
+  annotations/labels.
+
+It is possible to specify **default values** for peer autodiscovery:
+
+```yaml
+peer-autodiscovery:
+  defaults:
+    my-asn: 100
+    peer-asn: 200
+```
+
+Default values are useful in cases where some BGP parameters are common for all
+node peers and therefore should be configured statically. For example, it is
+likely that ASNs be the same for all the peers on a given cluster.
+
 ## Advanced address pool configuration
 
 ### Controlling automatic address allocation
