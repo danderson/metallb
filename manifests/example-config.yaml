@@ -5,7 +5,7 @@ metadata:
   name: config
 data:
   config: |
-    # The peers section tells MetalLB what BGP routers to connect too. There
+    # The peers section tells MetalLB what BGP routers to connect to. There
     # is one entry for each router you want to peer with.
     peers:
     - # The target IP address for the BGP session.
