@@ -29,6 +29,14 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 )
 
+const (
+	// DefaultBGPHoldTime is the default hold time value (in seconds) used for
+	// BGP peers.
+	DefaultBGPHoldTime = 90
+	// DefautBGPPeerPort is the default remote port used for BGP peers.
+	DefautBGPPeerPort = 179
+)
+
 // configFile is the configuration as parsed out of the ConfigMap,
 // without validation or useful high level types.
 type configFile struct {
@@ -385,7 +393,7 @@ func parsePeer(p peer) (*Peer, error) {
 	if ip == nil {
 		return nil, fmt.Errorf("invalid peer IP %q", p.Addr)
 	}
-	holdTime := 90 * time.Second
+	holdTime := DefaultBGPHoldTime * time.Second
 	if p.HoldTime != "" {
 		ht, err := ParseHoldTime(p.HoldTime)
 		if err != nil {
@@ -393,7 +401,7 @@ func parsePeer(p peer) (*Peer, error) {
 		}
 		holdTime = ht
 	}
-	port := uint16(179)
+	port := uint16(DefautBGPPeerPort)
 	if p.Port != 0 {
 		port = p.Port
 	}
