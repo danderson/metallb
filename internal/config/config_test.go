@@ -54,6 +54,7 @@ peers:
   peer-port: 1179
   hold-time: 180s
   router-id: 10.20.30.40
+  address-pools: ["pool2"]
 - my-asn: 100
   peer-asn: 200
   peer-address: 2.3.4.5
@@ -102,6 +103,7 @@ address-pools:
 						HoldTime:      180 * time.Second,
 						RouterID:      net.ParseIP("10.20.30.40"),
 						NodeSelectors: []labels.Selector{labels.Everything()},
+						AddressPools:  map[string]struct{}{"pool2": {}},
 					},
 					{
 						MyASN:         100,
@@ -110,10 +112,12 @@ address-pools:
 						Port:          179,
 						HoldTime:      90 * time.Second,
 						NodeSelectors: []labels.Selector{selector("bar in (quux),foo=bar")},
+						AddressPools:  nil,
 					},
 				},
 				Pools: map[string]*Pool{
 					"pool1": {
+						Name:          "pool1",
 						Protocol:      BGP,
 						CIDR:          []*net.IPNet{ipnet("10.20.0.0/16"), ipnet("10.50.0.0/24")},
 						AvoidBuggyIPs: true,
@@ -134,6 +138,7 @@ address-pools:
 						},
 					},
 					"pool2": {
+						Name:       "pool2",
 						Protocol:   BGP,
 						CIDR:       []*net.IPNet{ipnet("30.0.0.0/8")},
 						AutoAssign: true,
@@ -145,6 +150,7 @@ address-pools:
 						},
 					},
 					"pool3": {
+						Name:     "pool3",
 						Protocol: Layer2,
 						CIDR: []*net.IPNet{
 							ipnet("40.0.0.0/25"),
@@ -162,6 +168,7 @@ address-pools:
 						AutoAssign: true,
 					},
 					"pool4": {
+						Name:       "pool4",
 						Protocol:   Layer2,
 						CIDR:       []*net.IPNet{ipnet("2001:db8::/64")},
 						AutoAssign: true,
@@ -412,6 +419,7 @@ address-pools:
 			want: &Config{
 				Pools: map[string]*Pool{
 					"pool1": {
+						Name:       "pool1",
 						Protocol:   BGP,
 						AutoAssign: true,
 						CIDR:       []*net.IPNet{ipnet("1.2.3.0/24")},
@@ -437,6 +445,7 @@ address-pools:
 			want: &Config{
 				Pools: map[string]*Pool{
 					"pool1": {
+						Name:       "pool1",
 						Protocol:   BGP,
 						AutoAssign: true,
 						CIDR:       []*net.IPNet{ipnet("1.2.3.0/24")},
@@ -599,6 +608,31 @@ address-pools:
   - 10.0.0.0/16
   bgp-advertisements:
   - communities: ["flarb"]
+`,
+		},
+		{
+			desc: "Unknown address pool in peer config",
+			raw: `
+peers:
+- my-asn: 42
+  peer-asn: 42
+  peer-address: 1.2.3.4
+  address-pools: ["pool1"]
+`,
+		},
+		{
+			desc: "Invalid address pool type in peer config",
+			raw: `
+peers:
+- my-asn: 42
+  peer-asn: 42
+  peer-address: 1.2.3.4
+  address-pools: ["pool1"]
+address-pools:
+- name: pool1
+  protocol: layer2
+  addresses:
+  - 10.0.0.0/16
 `,
 		},
 	}

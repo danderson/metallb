@@ -280,3 +280,31 @@ misguided
 If you encounter this issue with your users or networks, you can set
 `avoid-buggy-ips: true` on an address pool to mark `.0` and `.255`
 addresses as unusable.
+
+### Limit which peers will receive announcements for address pool
+By default, every address pool will be announced to each BGP peer defined in the configuration.
+It is possible to explicitly select which address pools will be announced to the peer.
+
+```yaml
+peers:
+- peer-address: 10.0.0.1
+  peer-asn: 64501
+  my-asn: 64500
+- peer-address: 10.0.0.2
+  peer-asn: 64502
+  my-asn: 64500
+  address-pools:
+  - pool2
+address-pools:
+- name: pool1
+  protocol: bgp
+  addresses:
+  - 192.168.144.0/20
+- name: pool2
+  protocol: bgp
+  addresses:
+  - 42.176.25.64/30
+```
+
+Peer `10.0.0.1` will receive prefixes from `pool1` and `pool2`.
+Peer  `10.0.0.2` will receive prefixes from `pool2` only.

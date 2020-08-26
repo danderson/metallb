@@ -36,12 +36,17 @@ type peer struct {
 	bgp session
 }
 
+type advertisementData struct {
+	Adv      *bgp.Advertisement
+	PoolName string
+}
+
 type bgpController struct {
 	logger     log.Logger
 	myNode     string
 	nodeLabels labels.Set
 	peers      []*peer
-	svcAds     map[string][]*bgp.Advertisement
+	svcAds     map[string][]*advertisementData
 }
 
 func (c *bgpController) SetConfig(l log.Logger, cfg *config.Config) error {
@@ -222,7 +227,8 @@ func (c *bgpController) SetBalancer(l log.Logger, name string, lbIP net.IP, pool
 			ad.Communities = append(ad.Communities, comm)
 		}
 		sort.Slice(ad.Communities, func(i, j int) bool { return ad.Communities[i] < ad.Communities[j] })
-		c.svcAds[name] = append(c.svcAds[name], ad)
+
+		c.svcAds[name] = append(c.svcAds[name], &advertisementData{Adv: ad, PoolName: pool.Name})
 	}
 
 	if err := c.updateAds(); err != nil {
@@ -235,7 +241,7 @@ func (c *bgpController) SetBalancer(l log.Logger, name string, lbIP net.IP, pool
 }
 
 func (c *bgpController) updateAds() error {
-	var allAds []*bgp.Advertisement
+	var allAds []*advertisementData
 	for _, ads := range c.svcAds {
 		// This list might contain duplicates, but that's fine,
 		// they'll get compacted by the session code when it's
@@ -249,7 +255,19 @@ func (c *bgpController) updateAds() error {
 		if peer.bgp == nil {
 			continue
 		}
-		if err := peer.bgp.Set(allAds...); err != nil {
+		var peerAds []*bgp.Advertisement
+		if peer.cfg.AddressPools == nil {
+			for _, adv := range allAds {
+				peerAds = append(peerAds, adv.Adv)
+			}
+		} else {
+			for _, adv := range allAds {
+				if _, ok := peer.cfg.AddressPools[adv.PoolName]; ok {
+					peerAds = append(peerAds, adv.Adv)
+				}
+			}
+		}
+		if err := peer.bgp.Set(peerAds...); err != nil {
 			return err
 		}
 	}

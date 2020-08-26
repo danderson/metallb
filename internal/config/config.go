@@ -45,6 +45,7 @@ type peer struct {
 	RouterID      string         `yaml:"router-id"`
 	NodeSelectors []nodeSelector `yaml:"node-selectors"`
 	Password      string         `yaml:"password"`
+	AddressPools  []string       `yaml:"address-pools"`
 }
 
 type nodeSelector struct {
@@ -109,11 +110,15 @@ type Peer struct {
 	NodeSelectors []labels.Selector
 	// Authentication password for routers enforcing TCP MD5 authenticated sessions
 	Password string
+	// AddressPools which should be announced to the peer
+	AddressPools map[string]struct{}
 	// TODO: more BGP session settings
 }
 
 // Pool is the configuration of an IP address pool.
 type Pool struct {
+	// Name address pool name
+	Name string
 	// Protocol for this pool.
 	Protocol Proto
 	// The addresses that are part of this pool, expressed as CIDR
@@ -195,13 +200,6 @@ func Parse(bs []byte) (*Config, error) {
 	}
 
 	cfg := &Config{Pools: map[string]*Pool{}}
-	for i, p := range raw.Peers {
-		peer, err := parsePeer(p)
-		if err != nil {
-			return nil, fmt.Errorf("parsing peer #%d: %s", i+1, err)
-		}
-		cfg.Peers = append(cfg.Peers, peer)
-	}
 
 	communities := map[string]uint32{}
 	for n, v := range raw.BGPCommunities {
@@ -211,7 +209,6 @@ func Parse(bs []byte) (*Config, error) {
 		}
 		communities[n] = c
 	}
-
 	var allCIDRs []*net.IPNet
 	for i, p := range raw.Pools {
 		pool, err := parseAddressPool(p, communities)
@@ -237,10 +234,18 @@ func Parse(bs []byte) (*Config, error) {
 		cfg.Pools[p.Name] = pool
 	}
 
+	for i, p := range raw.Peers {
+		peer, err := parsePeer(p, cfg.Pools)
+		if err != nil {
+			return nil, fmt.Errorf("parsing peer #%d: %s", i+1, err)
+		}
+		cfg.Peers = append(cfg.Peers, peer)
+	}
+
 	return cfg, nil
 }
 
-func parsePeer(p peer) (*Peer, error) {
+func parsePeer(p peer, addressPoolsCfg map[string]*Pool) (*Peer, error) {
 	if p.MyASN == 0 {
 		return nil, errors.New("missing local ASN")
 	}
@@ -290,6 +295,22 @@ func parsePeer(p peer) (*Peer, error) {
 	if p.Password != "" {
 		password = p.Password
 	}
+
+	var peerAddressPools map[string]struct{}
+	if p.AddressPools != nil {
+		peerAddressPools = make(map[string]struct{})
+		for _, p := range p.AddressPools {
+			addrPool, exist := addressPoolsCfg[p]
+			if !exist {
+				return nil, fmt.Errorf("unknown address pool in peer configuration: %s", p)
+			}
+			if addrPool.Protocol != BGP {
+				return nil, fmt.Errorf("not BGP address pool in peer configuration: %s", p)
+			}
+			peerAddressPools[p] = struct{}{}
+		}
+	}
+
 	return &Peer{
 		MyASN:         p.MyASN,
 		ASN:           p.ASN,
@@ -298,6 +319,7 @@ func parsePeer(p peer) (*Peer, error) {
 		HoldTime:      holdTime,
 		RouterID:      routerID,
 		NodeSelectors: nodeSels,
+		AddressPools:  peerAddressPools,
 		Password:      password,
 	}, nil
 }
@@ -308,6 +330,7 @@ func parseAddressPool(p addressPool, bgpCommunities map[string]uint32) (*Pool, e
 	}
 
 	ret := &Pool{
+		Name:          p.Name,
 		Protocol:      p.Protocol,
 		AvoidBuggyIPs: p.AvoidBuggyIPs,
 		AutoAssign:    true,

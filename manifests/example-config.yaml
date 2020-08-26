@@ -44,6 +44,10 @@ data:
         - key: beta.kubernetes.io/arch
           operator: In
           values: [amd64, arm]
+      # (optional) Select address pools which will be anounced to the peer
+      # By default, all address-pools will be anounced
+      address-pools:
+      -  my-ip-space
 
     # The address-pools section lists the IP addresses that MetalLB is
     # allowed to allocate, along with settings for how to advertise
