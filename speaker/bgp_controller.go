@@ -25,7 +25,7 @@ import (
 
 	"go.universe.tf/metallb/internal/bgp"
 	"go.universe.tf/metallb/internal/config"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 
 	"github.com/go-kit/kit/log"
@@ -136,7 +136,7 @@ func healthyEndpointExists(eps *v1.Endpoints) bool {
 	return false
 }
 
-func (c *bgpController) ShouldAnnounce(l log.Logger, name string, svc *v1.Service, eps *v1.Endpoints) string {
+func (c *bgpController) ShouldAnnounce(l log.Logger, svc *v1.Service, eps *v1.Endpoints, _ net.IP) string {
 	// Should we advertise?
 	// Yes, if externalTrafficPolicy is
 	//  Cluster && any healthy endpoint exists

@@ -24,7 +24,7 @@ import (
 	"github.com/hashicorp/memberlist"
 	"go.universe.tf/metallb/internal/config"
 	"go.universe.tf/metallb/internal/layer2"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 )
 
 type layer2Controller struct {
@@ -39,7 +39,7 @@ func (c *layer2Controller) SetConfig(log.Logger, *config.Config) error {
 
 // usableNodes returns all nodes that have at least one fully ready
 // endpoint on them.
-func usableNodes(eps *v1.Endpoints, mList *memberlist.Memberlist) []string {
+func usableNodes(isTrafficLocal bool, eps *v1.Endpoints, mList *memberlist.Memberlist) []string {
 	var activeNodes map[string]bool
 	if mList != nil {
 		activeNodes = map[string]bool{}
@@ -49,20 +49,25 @@ func usableNodes(eps *v1.Endpoints, mList *memberlist.Memberlist) []string {
 	}
 
 	usable := map[string]bool{}
-	for _, subset := range eps.Subsets {
-		for _, ep := range subset.Addresses {
-			if ep.NodeName == nil {
-				continue
-			}
-			if activeNodes != nil {
-				if _, ok := activeNodes[*ep.NodeName]; !ok {
+	if isTrafficLocal {
+		for _, subset := range eps.Subsets {
+			for _, ep := range subset.Addresses {
+				if ep.NodeName == nil {
 					continue
 				}
-			}
-			if _, ok := usable[*ep.NodeName]; !ok {
-				usable[*ep.NodeName] = true
+				if activeNodes != nil {
+					if _, ok := activeNodes[*ep.NodeName]; !ok {
+						continue
+					}
+				}
+				if _, ok := usable[*ep.NodeName]; !ok {
+					usable[*ep.NodeName] = true
+				}
 			}
 		}
+	} else {
+		// For non traffic local services, all nodes are usable.
+		usable = activeNodes
 	}
 
 	var ret []string
@@ -75,14 +80,14 @@ func usableNodes(eps *v1.Endpoints, mList *memberlist.Memberlist) []string {
 	return ret
 }
 
-func (c *layer2Controller) ShouldAnnounce(l log.Logger, name string, svc *v1.Service, eps *v1.Endpoints) string {
-	nodes := usableNodes(eps, c.mList)
-	// Sort the slice by the hash of node + service name. This
-	// produces an ordering of ready nodes that is unique to this
-	// service.
+func (c *layer2Controller) ShouldAnnounce(l log.Logger, svc *v1.Service, eps *v1.Endpoints, lbIP net.IP) string {
+	nodes := usableNodes(svc.Spec.ExternalTrafficPolicy == v1.ServiceExternalTrafficPolicyTypeLocal, eps, c.mList)
+	// Sort the slice by the hash of node + service IP. This
+	// produces an ordering of ready nodes that is unique to the IP
+	// so that all services sharing the same IP are annonced from the same node.
 	sort.Slice(nodes, func(i, j int) bool {
-		hi := sha256.Sum256([]byte(nodes[i] + "#" + name))
-		hj := sha256.Sum256([]byte(nodes[j] + "#" + name))
+		hi := sha256.Sum256([]byte(nodes[i] + "#" + lbIP.String()))
+		hj := sha256.Sum256([]byte(nodes[j] + "#" + lbIP.String()))
 
 		return bytes.Compare(hi[:], hj[:]) < 0
 	})

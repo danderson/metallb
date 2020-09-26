@@ -321,7 +321,7 @@ func (c *controller) SetBalancer(l gokitlog.Logger, name string, svc *v1.Service
 		return c.deleteBalancer(l, name, "internalError")
 	}
 
-	if deleteReason := handler.ShouldAnnounce(l, name, svc, eps); deleteReason != "" {
+	if deleteReason := handler.ShouldAnnounce(l, svc, eps, lbIP); deleteReason != "" {
 		return c.deleteBalancer(l, name, deleteReason)
 	}
 
@@ -424,7 +424,7 @@ func (c *controller) SetNode(l gokitlog.Logger, node *v1.Node) k8s.SyncState {
 // A Protocol can advertise an IP address.
 type Protocol interface {
 	SetConfig(gokitlog.Logger, *config.Config) error
-	ShouldAnnounce(gokitlog.Logger, string, *v1.Service, *v1.Endpoints) string
+	ShouldAnnounce(gokitlog.Logger, *v1.Service, *v1.Endpoints, net.IP) string
 	SetBalancer(gokitlog.Logger, string, net.IP, *config.Pool) error
 	DeleteBalancer(gokitlog.Logger, string, string) error
 	SetNode(gokitlog.Logger, *v1.Node) error
