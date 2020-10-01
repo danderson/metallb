@@ -37,6 +37,16 @@ func (c *layer2Controller) SetConfig(log.Logger, *config.Config) error {
 	return nil
 }
 
+func activeNodes(mList *memberlist.Memberlist) []string {
+	var activeNodes []string
+	if mList != nil {
+		for _, n := range mList.Members() {
+		    activeNodes = append(activeNodes, n.Name)
+		}
+	}
+    return activeNodes
+}
+
 // usableNodes returns all nodes that have at least one fully ready
 // endpoint on them.
 func usableNodes(eps *v1.Endpoints, mList *memberlist.Memberlist) []string {
@@ -77,6 +87,11 @@ func usableNodes(eps *v1.Endpoints, mList *memberlist.Memberlist) []string {
 
 func (c *layer2Controller) ShouldAnnounce(l log.Logger, name string, svc *v1.Service, eps *v1.Endpoints) string {
 	nodes := usableNodes(eps, c.mList)
+		
+	if len(nodes) == 0 && svc.Spec.ExternalTrafficPolicy == "Cluster" {
+		nodes = activeNodes(c.mList)
+	}
+	
 	// Sort the slice by the hash of node + service name. This
 	// produces an ordering of ready nodes that is unique to this
 	// service.
