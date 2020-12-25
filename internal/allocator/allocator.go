@@ -12,6 +12,15 @@ import (
 	"github.com/mikioh/ipaddr"
 )
 
+
+type IPType int
+const (
+	IPv4 IPType = iota
+	IPv6
+	DualStack
+	Invalid
+)
+
 // An Allocator tracks IP address pools and allocates addresses from them.
 type Allocator struct {
 	pools map[string]*config.Pool
@@ -41,7 +50,7 @@ type key struct {
 
 type alloc struct {
 	pool  string
-	ip    net.IP
+	ips   []net.IP
 	ports []Port
 	key
 }
@@ -59,15 +68,43 @@ func New() *Allocator {
 	}
 }
 
+func (a *Allocator) ParseIPs(ipstrings []string) (IPType, []net.IP, error) {
+	if len(ipstrings) < 1 || len(ipstrings) > 2 {
+		return Invalid, nil, fmt.Errorf("Must be two addresses (%d)", len(ipstrings))
+	}
+	ip := net.ParseIP(ipstrings[0])
+	if ip == nil {
+		return Invalid, nil, fmt.Errorf("Invalid address %q", ipstrings[0])
+	}
+	if len(ipstrings) == 1 {
+		if ip.To4() != nil {
+			return IPv4, []net.IP{ip}, nil
+		} else {
+			return IPv6, []net.IP{ip}, nil
+		}
+	}
+	ip2 := net.ParseIP(ipstrings[1])
+	if ip2 == nil {
+		return Invalid, nil, fmt.Errorf("Invalid address %q", ipstrings[1])
+	}
+	if (ip.To4() == nil) == (ip2.To4() == nil) {
+		return Invalid, nil, fmt.Errorf("Same address family")
+	}
+	return DualStack, []net.IP{ip, ip2}, nil
+}
+
 // SetPools updates the set of address pools that the allocator owns.
 func (a *Allocator) SetPools(pools map[string]*config.Pool) error {
+
 	// All the fancy sharing stuff only influences how new allocations
 	// can be created. For changing the underlying configuration, the
 	// only question we have to answer is: can we fit all allocated
 	// IPs into address pools under the new configuration?
 	for svc, alloc := range a.allocated {
-		if poolFor(pools, alloc.ip) == "" {
-			return fmt.Errorf("new config not compatible with assigned IPs: service %q cannot own %q under new config", svc, alloc.ip)
+		// The pool is the same for both addresses in case of dual-stack.
+		ip := alloc.ips[0]
+		if poolFor(pools, ip) == "" {
+			return fmt.Errorf("new config not compatible with assigned IPs: service %q cannot own %q under new config", svc, ip)
 		}
 	}
 
@@ -83,7 +120,7 @@ func (a *Allocator) SetPools(pools map[string]*config.Pool) error {
 
 	// Need to rearrange existing pool mappings and counts
 	for svc, alloc := range a.allocated {
-		pool := poolFor(a.pools, alloc.ip)
+		pool := poolFor(a.pools, alloc.ips[0])
 		if pool != alloc.pool {
 			a.Unassign(svc)
 			alloc.pool = pool
@@ -105,63 +142,65 @@ func (a *Allocator) SetPools(pools map[string]*config.Pool) error {
 // assign unconditionally updates internal state to reflect svc's
 // allocation of alloc. Caller must ensure that this call is safe.
 func (a *Allocator) assign(svc string, alloc *alloc) {
+	// The pool is the same for both addresses in case of dual-stack.
+	ip := alloc.ips[0]
+
 	a.Unassign(svc)
 	a.allocated[svc] = alloc
-	a.sharingKeyForIP[alloc.ip.String()] = &alloc.key
-	if a.portsInUse[alloc.ip.String()] == nil {
-		a.portsInUse[alloc.ip.String()] = map[Port]string{}
+	a.sharingKeyForIP[ip.String()] = &alloc.key
+	if a.portsInUse[ip.String()] == nil {
+		a.portsInUse[ip.String()] = map[Port]string{}
 	}
 	for _, port := range alloc.ports {
-		a.portsInUse[alloc.ip.String()][port] = svc
+		a.portsInUse[ip.String()][port] = svc
 	}
-	if a.servicesOnIP[alloc.ip.String()] == nil {
-		a.servicesOnIP[alloc.ip.String()] = map[string]bool{}
+	if a.servicesOnIP[ip.String()] == nil {
+		a.servicesOnIP[ip.String()] = map[string]bool{}
 	}
-	a.servicesOnIP[alloc.ip.String()][svc] = true
+	a.servicesOnIP[ip.String()][svc] = true
 	if a.poolIPsInUse[alloc.pool] == nil {
 		a.poolIPsInUse[alloc.pool] = map[string]int{}
 	}
-	a.poolIPsInUse[alloc.pool][alloc.ip.String()]++
+	a.poolIPsInUse[alloc.pool][ip.String()]++
+	if len(alloc.ips) > 1 {
+		a.poolIPsInUse[alloc.pool][alloc.ips[1].String()]++
+	}
 
 	stats.poolCapacity.WithLabelValues(alloc.pool).Set(float64(poolCount(a.pools[alloc.pool])))
 	stats.poolActive.WithLabelValues(alloc.pool).Set(float64(len(a.poolIPsInUse[alloc.pool])))
 }
 
-// Assign assigns the requested ip to svc, if the assignment is
+// Assign assigns the requested ip's to svc, if the assignment is
 // permissible by sharingKey and backendKey.
-func (a *Allocator) Assign(svc string, ip net.IP, ports []Port, sharingKey, backendKey string) error {
-	pool := poolFor(a.pools, ip)
+func (a *Allocator) Assign(svc string, ips []net.IP, ports []Port, sharingKey, backendKey string) error {
+	pool := poolFor(a.pools, ips[0])
 	if pool == "" {
-		return fmt.Errorf("%q is not allowed in config", ip)
+		return fmt.Errorf("%q is not allowed in config", ips[0])
 	}
+	// Check the dual-stack constraints:
+	// - Two addresses
+	// - Different families, ipv4 and ipv6
+	// - Allocated from the same pool
+	if len(ips) > 1 {
+		if len(ips) > 2 {
+			return fmt.Errorf("More than two addesses %q", ips)
+		}
+		if ipIPType(ips[0]) == ipIPType(ips[1]) {
+			return fmt.Errorf("%q %q is has the same family", ips[0], ips[1])
+		}
+		if poolFor(a.pools, ips[1]) != pool {
+			return fmt.Errorf("%q %q different pools", ips[0], ips[1])
+		}
+	}
+
 	sk := &key{
 		sharing: sharingKey,
 		backend: backendKey,
 	}
 
-	// Does the IP already have allocs? If so, needs to be the same
-	// sharing key, and have non-overlapping ports. If not, the
-	// proposed IP needs to be allowed by configuration.
-	if existingSK := a.sharingKeyForIP[ip.String()]; existingSK != nil {
-		if err := sharingOK(existingSK, sk); err != nil {
-			// Sharing key is incompatible. However, if the owner is
-			// the same service, and is the only user of the IP, we
-			// can just update its sharing key in place.
-			var otherSvcs []string
-			for otherSvc := range a.servicesOnIP[ip.String()] {
-				if otherSvc != svc {
-					otherSvcs = append(otherSvcs, otherSvc)
-				}
-			}
-			if len(otherSvcs) > 0 {
-				return fmt.Errorf("can't change sharing key for %q, address also in use by %s", svc, strings.Join(otherSvcs, ","))
-			}
-		}
-
-		for _, port := range ports {
-			if curSvc, ok := a.portsInUse[ip.String()][port]; ok && curSvc != svc {
-				return fmt.Errorf("port %s is already in use on %q", port, ip)
-			}
+	for _, ip := range ips {
+		if err := a.checkSharing(svc, ip.String(), ports, sk); err != nil {
+			return err
 		}
 	}
 
@@ -172,7 +211,7 @@ func (a *Allocator) Assign(svc string, ip net.IP, ports []Port, sharingKey, back
 	// unconditionally safe to do.
 	alloc := &alloc{
 		pool:  pool,
-		ip:    ip,
+		ips:   ips,
 		ports: make([]Port, len(ports)),
 		key:   *sk,
 	}
@@ -192,46 +231,62 @@ func (a *Allocator) Unassign(svc string) bool {
 
 	al := a.allocated[svc]
 	delete(a.allocated, svc)
+
+	// The pool is the same for both addresses in case of dual-stack.
+	ip := al.ips[0]
+
 	for _, port := range al.ports {
-		if curSvc := a.portsInUse[al.ip.String()][port]; curSvc != svc {
+		if curSvc := a.portsInUse[ip.String()][port]; curSvc != svc {
 			panic(fmt.Sprintf("incoherent state, I thought port %q belonged to service %q, but it seems to belong to %q", port, svc, curSvc))
 		}
-		delete(a.portsInUse[al.ip.String()], port)
+		delete(a.portsInUse[ip.String()], port)
 	}
-	delete(a.servicesOnIP[al.ip.String()], svc)
-	if len(a.portsInUse[al.ip.String()]) == 0 {
-		delete(a.portsInUse, al.ip.String())
-		delete(a.sharingKeyForIP, al.ip.String())
+	delete(a.servicesOnIP[ip.String()], svc)
+	if len(a.portsInUse[ip.String()]) == 0 {
+		delete(a.portsInUse, ip.String())
+		delete(a.sharingKeyForIP, ip.String())
 	}
-	a.poolIPsInUse[al.pool][al.ip.String()]--
-	if a.poolIPsInUse[al.pool][al.ip.String()] == 0 {
-		// Explicitly delete unused IPs from the pool, so that len()
-		// is an accurate count of IPs in use.
-		delete(a.poolIPsInUse[al.pool], al.ip.String())
+
+	for _, ip := range al.ips {
+		a.poolIPsInUse[al.pool][ip.String()]--
+		if a.poolIPsInUse[al.pool][ip.String()] == 0 {
+			// Explicitly delete unused IPs from the pool, so that len()
+			// is an accurate count of IPs in use.
+			delete(a.poolIPsInUse[al.pool], ip.String())
+		}
 	}
+
 	stats.poolActive.WithLabelValues(al.pool).Set(float64(len(a.poolIPsInUse[al.pool])))
 	return true
 }
 
-func cidrIsIPv6(cidr *net.IPNet) bool {
-	return cidr.IP.To4() == nil
+func cidrIPType(cidr *net.IPNet) IPType {
+	if cidr.IP.To4() == nil {
+		return IPv6
+	}
+	return IPv4
 }
-func ipIsIPv6(ip net.IP) bool {
-	return ip.To4() == nil
+func ipIPType(ip net.IP) IPType {
+	if ip.To4() == nil {
+		return IPv6
+	}
+	return IPv4
 }
 
 // AllocateFromPool assigns an available IP from pool to service.
-func (a *Allocator) AllocateFromPool(svc string, isIPv6 bool, poolName string, ports []Port, sharingKey, backendKey string) (net.IP, error) {
+func (a *Allocator) AllocateFromPool(svc string, iptype IPType, poolName string, ports []Port, sharingKey, backendKey string) ([]net.IP, error) {
 	if alloc := a.allocated[svc]; alloc != nil {
-		// Handle the case where the svc has already been assigned an IP but from the wrong family.
-		// This "should-not-happen" since the "ipFamily" is an immutable field in services.
-		if isIPv6 != ipIsIPv6(alloc.ip) {
-			return nil, fmt.Errorf("IP for wrong family assigned %s", alloc.ip.String())
+		if iptype != DualStack {
+			// Handle the case where the svc has already been assigned an IP but from the wrong family.
+			// This "should-not-happen" since the "ipFamily" is an immutable field in services.
+			if iptype != ipIPType(alloc.ips[0]) {
+				return nil, fmt.Errorf("IP for wrong family assigned %s", alloc.ips[0].String())
+			}
 		}
-		if err := a.Assign(svc, alloc.ip, ports, sharingKey, backendKey); err != nil {
+		if err := a.Assign(svc, alloc.ips, ports, sharingKey, backendKey); err != nil {
 			return nil, err
 		}
-		return alloc.ip, nil
+		return alloc.ips, nil
 	}
 
 	pool := a.pools[poolName]
@@ -239,66 +294,118 @@ func (a *Allocator) AllocateFromPool(svc string, isIPv6 bool, poolName string, p
 		return nil, fmt.Errorf("unknown pool %q", poolName)
 	}
 
-	for _, cidr := range pool.CIDR {
-		if cidrIsIPv6(cidr) != isIPv6 {
-			// Not the right ip-family
-			continue
-		}
-		c := ipaddr.NewCursor([]ipaddr.Prefix{*ipaddr.NewPrefix(cidr)})
-		for pos := c.First(); pos != nil; pos = c.Next() {
-			ip := pos.IP
-			if pool.AvoidBuggyIPs && ipConfusesBuggyFirmwares(ip) {
+	sk := &key{
+		sharing: sharingKey,
+		backend: backendKey,
+	}
+	if iptype != DualStack {
+		ips := make([]net.IP, 1)
+		for _, cidr := range pool.CIDR {
+			if cidrIPType(cidr) != iptype {
+				// Not the right ip-family
 				continue
 			}
-			// Somewhat inefficiently brute-force by invoking the
-			// IP-specific allocator.
-			if err := a.Assign(svc, ip, ports, sharingKey, backendKey); err == nil {
-				return ip, nil
+			c := ipaddr.NewCursor([]ipaddr.Prefix{*ipaddr.NewPrefix(cidr)})
+			for pos := c.First(); pos != nil; pos = c.Next() {
+				if pool.AvoidBuggyIPs && ipConfusesBuggyFirmwares(pos.IP) {
+					continue
+				}
+				if a.checkSharing(svc, pos.IP.String(), ports, sk) != nil {
+					continue
+				}
+				ips[0] = pos.IP
+				break
 			}
+		}
+		if ips[0] == nil {
+			// Woops, run out of IPs :( Fail.
+			return nil, fmt.Errorf("no available IPs in pool %q", poolName)
+		}
+		err := a.Assign(svc, ips, ports, sharingKey, backendKey)
+		if err != nil {
+			return nil, err
+		}
+		return ips, nil
+	}
+
+	// Dual stack
+	ips := make([]net.IP, 2)
+
+	for _, cidr := range pool.CIDR {
+		if ips[0] == nil {
+			c := ipaddr.NewCursor([]ipaddr.Prefix{*ipaddr.NewPrefix(cidr)})
+			for pos := c.First(); pos != nil; pos = c.Next() {
+				if pool.AvoidBuggyIPs && ipConfusesBuggyFirmwares(pos.IP) {
+					continue
+				}
+				if a.checkSharing(svc, pos.IP.String(), ports, sk) != nil {
+					continue
+				}
+				ips[0] = pos.IP
+				break
+			}
+		} else {
+			if cidrIPType(cidr) == ipIPType(ips[0]) {
+				continue
+			}
+			c := ipaddr.NewCursor([]ipaddr.Prefix{*ipaddr.NewPrefix(cidr)})
+			for pos := c.First(); pos != nil; pos = c.Next() {
+				if pool.AvoidBuggyIPs && ipConfusesBuggyFirmwares(pos.IP) {
+					continue
+				}
+				if a.checkSharing(svc, pos.IP.String(), ports, sk) != nil {
+					continue
+				}
+				ips[1] = pos.IP
+				break
+			}
+		}
+		if ips[1] != nil {
+			break
 		}
 	}
 
-	// Woops, run out of IPs :( Fail.
-	return nil, fmt.Errorf("no available IPs in pool %q", poolName)
+	if ips[1] == nil {
+		// Woops, run out of IPs :( Fail.
+		return nil, fmt.Errorf("no available IPs for in pool %q", poolName)
+	}
+
+	err := a.Assign(svc, ips, ports, sharingKey, backendKey)
+	if err != nil {
+		return nil, err
+	}
+	return ips, nil
+
 }
 
 // Allocate assigns any available and assignable IP to service.
-func (a *Allocator) Allocate(svc string, isIPv6 bool, ports []Port, sharingKey, backendKey string) (net.IP, error) {
+func (a *Allocator) Allocate(svc string, iptype IPType, ports []Port, sharingKey, backendKey string) ([]net.IP, error) {
 	if alloc := a.allocated[svc]; alloc != nil {
-		if err := a.Assign(svc, alloc.ip, ports, sharingKey, backendKey); err != nil {
+		if err := a.Assign(svc, alloc.ips, ports, sharingKey, backendKey); err != nil {
 			return nil, err
 		}
-		return alloc.ip, nil
+		return alloc.ips, nil
 	}
 
 	for poolName := range a.pools {
 		if !a.pools[poolName].AutoAssign {
 			continue
 		}
-		if ip, err := a.AllocateFromPool(svc, isIPv6, poolName, ports, sharingKey, backendKey); err == nil {
-			return ip, nil
+		if ips, err := a.AllocateFromPool(svc, iptype, poolName, ports, sharingKey, backendKey); err == nil {
+			return ips, nil
 		}
 	}
 
 	return nil, errors.New("no available IPs")
 }
 
-// IP returns the IP address allocated to service, or nil if none are allocated.
-func (a *Allocator) IP(svc string) net.IP {
-	if alloc := a.allocated[svc]; alloc != nil {
-		return alloc.ip
-	}
-	return nil
-}
-
 // Pool returns the pool from which service's IP was allocated. If
 // service has no IP allocated, "" is returned.
 func (a *Allocator) Pool(svc string) string {
-	ip := a.IP(svc)
-	if ip == nil {
-		return ""
+	if alloc := a.allocated[svc]; alloc != nil {
+		return poolFor(a.pools, alloc.ips[0])
 	}
-	return poolFor(a.pools, ip)
+	return ""
 }
 
 func sharingOK(existing, new *key) error {
@@ -392,4 +499,33 @@ func ipConfusesBuggyFirmwares(ip net.IP) bool {
 		return false
 	}
 	return ip[3] == 0 || ip[3] == 255
+}
+
+// Does the IP already have allocs? If so, needs to be the same
+// sharing key, and have non-overlapping ports. If not, the
+// proposed IP needs to be allowed by configuration.
+func (a *Allocator) checkSharing(svc string, ip string, ports []Port, sk *key) error {
+	if existingSK := a.sharingKeyForIP[ip]; existingSK != nil {
+		if err := sharingOK(existingSK, sk); err != nil {
+			// Sharing key is incompatible. However, if the owner is
+			// the same service, and is the only user of the IP, we
+			// can just update its sharing key in place.
+			var otherSvcs []string
+			for otherSvc := range a.servicesOnIP[ip] {
+				if otherSvc != svc {
+					otherSvcs = append(otherSvcs, otherSvc)
+				}
+			}
+			if len(otherSvcs) > 0 {
+				return fmt.Errorf("can't change sharing key for %q, address also in use by %s", svc, strings.Join(otherSvcs, ","))
+			}
+		}
+
+		for _, port := range ports {
+			if curSvc, ok := a.portsInUse[ip][port]; ok && curSvc != svc {
+				return fmt.Errorf("port %s is already in use on %q", port, ip)
+			}
+		}
+	}
+	return nil
 }
