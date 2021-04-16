@@ -13,6 +13,19 @@ Are you actually ready to release? Check the milestone on github and
 verify that all its issues are closed. If there are open issues,
 you'll have to either resolve them, or bump to the next version.
 
+### Check for outdated dependencies
+
+This might be a little late to do at release time, but releases are not so
+frequent for now, so it makes sense to do this before creating a release.
+
+Some dependencies are usually best to stay fresh, like client-go and friends.
+But ideally we should be using recent versions of all our dependencies.
+
+If client-go is too old (like 2-3 releases old), from time to time Kubernetes
+may remove some field that breaks MetalLB if it is using an old version. Make
+sure either to use a recent version or create an issue to do a new release,
+after proper testing, to update client-go.
+
 ### Finalize release notes
 
 All release notes are always written on the `main` branch, and
