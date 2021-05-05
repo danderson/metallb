@@ -88,11 +88,43 @@ data:
       - 192.168.10.0/24
 ```
 
+By default, BGP speaker will announce IPv4 prefixes as specified in RFC4271. 
+For IPv6 prefixes Multiprotocol extension for BGP-4 (RFC4760) will be used.
+If peer supports Multiprotocol encoding for IPv4 you can allow MetalLB to use it via `allow-mp-bgp-encoding-ipv4` option.
+
+`allow-ipv4-prefixes` and `allow-ipv6-prefixes` peers options provide additional control of prefixes announcement to the peer. By default, both options are `true`. As a result, announce of both address families will happen to the peer. You can disable announcements of the specific IP address family by settings these options to `false`.
+
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  namespace: metallb-system
+  name: config
+data:
+  config: |
+    peers:
+    - peer-address: 10.0.0.1
+      peer-asn: 64501
+      my-asn: 64500
+      allow-mp-bgp-encoding-ipv4: true
+    - peer-address: 10.0.0.2
+      peer-asn: 64501
+      my-asn: 64500
+      allow-ipv6-prefixes: false
+    address-pools:
+    - name: default
+      protocol: bgp
+      addresses:
+      - 192.168.10.0/24
+      - 2001:db8:a0b:12f0::/64
+```
+
 ### Advertisement configuration
 
 By default, BGP mode advertises each allocated IP to the configured
 peers with no additional BGP attributes. The peer router(s) will
-receive one `/32` route for each service IP, with the BGP localpref
+receive one `/32` (`/128` for IPv6) route for each service IP, with the BGP localpref
 set to zero and no BGP communities.
 
 You can configure more elaborate advertisements by adding a
@@ -100,7 +132,7 @@ You can configure more elaborate advertisements by adding a
 advertisements.
 
 In addition to specifying localpref and communities, you can use this
-to advertise aggregate routes. The `aggregation-length` advertisement
+to advertise aggregate routes. The `aggregation-length` (`aggregation-length-v6` for IPv6) advertisement
 option lets you "roll up" the /32s into a larger prefix. Combined with
 multiple advertisement configurations, this lets you create elaborate
 advertisements that interoperate with the rest of your BGP network.

@@ -38,14 +38,17 @@ type configFile struct {
 }
 
 type peer struct {
-	MyASN         uint32         `yaml:"my-asn"`
-	ASN           uint32         `yaml:"peer-asn"`
-	Addr          string         `yaml:"peer-address"`
-	Port          uint16         `yaml:"peer-port"`
-	HoldTime      string         `yaml:"hold-time"`
-	RouterID      string         `yaml:"router-id"`
-	NodeSelectors []nodeSelector `yaml:"node-selectors"`
-	Password      string         `yaml:"password"`
+	MyASN                uint32         `yaml:"my-asn"`
+	ASN                  uint32         `yaml:"peer-asn"`
+	Addr                 string         `yaml:"peer-address"`
+	Port                 uint16         `yaml:"peer-port"`
+	HoldTime             string         `yaml:"hold-time"`
+	RouterID             string         `yaml:"router-id"`
+	NodeSelectors        []nodeSelector `yaml:"node-selectors"`
+	Password             string         `yaml:"password"`
+	AllowMPBGPEncodingV4 bool           `yaml:"allow-mp-bgp-encoding-ipv4"`
+	AllowV4Prefixes      *bool          `yaml:"allow-ipv4-prefixes"`
+	AllowV6Prefixes      *bool          `yaml:"allow-ipv6-prefixes"`
 }
 
 type nodeSelector struct {
@@ -69,9 +72,10 @@ type addressPool struct {
 }
 
 type bgpAdvertisement struct {
-	AggregationLength *int `yaml:"aggregation-length"`
-	LocalPref         *uint32
-	Communities       []string
+	AggregationLength   *int `yaml:"aggregation-length"`
+	AggregationLengthV6 *int `yaml:"aggregation-length-v6"`
+	LocalPref           *uint32
+	Communities         []string
 }
 
 // Config is a parsed MetalLB configuration.
@@ -110,6 +114,12 @@ type Peer struct {
 	NodeSelectors []labels.Selector
 	// Authentication password for routers enforcing TCP MD5 authenticated sessions
 	Password string
+	// AllowMPBGPEncodingV4 allows MP BGP encoding for IPv4
+	AllowMPBGPEncodingV4 bool
+	// AllowV4Prefixes allows IPv4 prefixes announcements to the peer
+	AllowV4Prefixes bool
+	// AllowV4Prefixes allows IPv6 prefixes announcements to the peer
+	AllowV6Prefixes bool
 	// TODO: more BGP session settings
 }
 
@@ -141,6 +151,9 @@ type BGPAdvertisement struct {
 	// length. Optional, defaults to 32 (i.e. no aggregation) if not
 	// specified.
 	AggregationLength int
+	// Optional, defaults to 128 (i.e. no aggregation) if not
+	// specified.
+	AggregationLengthV6 int
 	// Value of the LOCAL_PREF BGP path attribute. Used only when
 	// advertising to IBGP peers (i.e. Peer.MyASN == Peer.ASN).
 	LocalPref uint32
@@ -299,15 +312,27 @@ func parsePeer(p peer) (*Peer, error) {
 	if p.Password != "" {
 		password = p.Password
 	}
+	allowV4Prefixes := true
+	if p.AllowV4Prefixes != nil {
+		allowV4Prefixes = *p.AllowV4Prefixes
+	}
+	allowV6Prefixes := true
+	if p.AllowV6Prefixes != nil {
+		allowV6Prefixes = *p.AllowV6Prefixes
+	}
+
 	return &Peer{
-		MyASN:         p.MyASN,
-		ASN:           p.ASN,
-		Addr:          ip,
-		Port:          port,
-		HoldTime:      holdTime,
-		RouterID:      routerID,
-		NodeSelectors: nodeSels,
-		Password:      password,
+		MyASN:                p.MyASN,
+		ASN:                  p.ASN,
+		Addr:                 ip,
+		Port:                 port,
+		HoldTime:             holdTime,
+		RouterID:             routerID,
+		NodeSelectors:        nodeSels,
+		Password:             password,
+		AllowMPBGPEncodingV4: p.AllowMPBGPEncodingV4,
+		AllowV4Prefixes:      allowV4Prefixes,
+		AllowV6Prefixes:      allowV6Prefixes,
 	}, nil
 }
 
@@ -361,9 +386,10 @@ func parseBGPAdvertisements(ads []bgpAdvertisement, cidrs []*net.IPNet, communit
 	if len(ads) == 0 {
 		return []*BGPAdvertisement{
 			{
-				AggregationLength: 32,
-				LocalPref:         0,
-				Communities:       map[uint32]bool{},
+				AggregationLength:   32,
+				AggregationLengthV6: 128,
+				LocalPref:           0,
+				Communities:         map[uint32]bool{},
 			},
 		}, nil
 	}
@@ -371,21 +397,35 @@ func parseBGPAdvertisements(ads []bgpAdvertisement, cidrs []*net.IPNet, communit
 	var ret []*BGPAdvertisement
 	for _, rawAd := range ads {
 		ad := &BGPAdvertisement{
-			AggregationLength: 32,
-			LocalPref:         0,
-			Communities:       map[uint32]bool{},
+			AggregationLength:   32,
+			AggregationLengthV6: 128,
+			LocalPref:           0,
+			Communities:         map[uint32]bool{},
 		}
 
 		if rawAd.AggregationLength != nil {
 			ad.AggregationLength = *rawAd.AggregationLength
 		}
 		if ad.AggregationLength > 32 {
-			return nil, fmt.Errorf("invalid aggregation length %q", ad.AggregationLength)
+			return nil, fmt.Errorf("invalid aggregation length for IPv4 %q", ad.AggregationLength)
 		}
+
+		if rawAd.AggregationLengthV6 != nil {
+			ad.AggregationLengthV6 = *rawAd.AggregationLengthV6
+		}
+		if ad.AggregationLengthV6 > 128 {
+			return nil, fmt.Errorf("invalid aggregation length for IPv6 %q", ad.AggregationLengthV6)
+		}
+
 		for _, cidr := range cidrs {
 			o, _ := cidr.Mask.Size()
-			if ad.AggregationLength < o {
-				return nil, fmt.Errorf("invalid aggregation length %d: prefix %q in this pool is more specific than the aggregation length", ad.AggregationLength, cidr)
+			maxLength := ad.AggregationLength
+			if cidr.IP.To4() == nil {
+				maxLength = ad.AggregationLengthV6
+			}
+			if maxLength < o {
+				return nil, fmt.Errorf("invalid aggregation length %d: prefix %q in "+
+					"this pool is more specific than the aggregation length", ad.AggregationLength, cidr)
 			}
 		}
 

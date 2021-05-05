@@ -184,7 +184,10 @@ func (c *bgpController) syncPeers(l log.Logger) error {
 			if p.cfg.RouterID != nil {
 				routerID = p.cfg.RouterID
 			}
-			s, err := newBGP(c.logger, net.JoinHostPort(p.cfg.Addr.String(), strconv.Itoa(int(p.cfg.Port))), p.cfg.MyASN, routerID, p.cfg.ASN, p.cfg.HoldTime, p.cfg.Password, c.myNode)
+			s, err := newBGP(c.logger, net.JoinHostPort(
+				p.cfg.Addr.String(), strconv.Itoa(int(p.cfg.Port))), p.cfg.MyASN,
+				routerID, p.cfg.ASN, p.cfg.HoldTime, p.cfg.Password, c.myNode,
+				p.cfg.AllowMPBGPEncodingV4, p.cfg.AllowV4Prefixes, p.cfg.AllowV6Prefixes)
 			if err != nil {
 				l.Log("op", "syncPeers", "error", err, "peer", p.cfg.Addr, "msg", "failed to create BGP session")
 				errs++
@@ -211,6 +214,10 @@ func (c *bgpController) SetBalancer(l log.Logger, name string, lbIP net.IP, pool
 	c.svcAds[name] = nil
 	for _, adCfg := range pool.BGPAdvertisements {
 		m := net.CIDRMask(adCfg.AggregationLength, 32)
+		isIPv6 := lbIP.To4() == nil
+		if isIPv6 {
+			m = net.CIDRMask(adCfg.AggregationLengthV6, 128)
+		}
 		ad := &bgp.Advertisement{
 			Prefix: &net.IPNet{
 				IP:   lbIP.Mask(m),
@@ -284,6 +291,9 @@ func (c *bgpController) SetNode(l log.Logger, node *v1.Node) error {
 	return c.syncPeers(l)
 }
 
-var newBGP = func(logger log.Logger, addr string, myASN uint32, routerID net.IP, asn uint32, hold time.Duration, password string, myNode string) (session, error) {
-	return bgp.New(logger, addr, myASN, routerID, asn, hold, password, myNode)
+var newBGP = func(logger log.Logger, addr string, myASN uint32, routerID net.IP,
+	asn uint32, hold time.Duration, password string, myNode string,
+	allowMPBGPEncodingV4, allowV4Prefixes, allowV6Prefixes bool) (session, error) {
+	return bgp.New(logger, addr, myASN, routerID, asn, hold, password, myNode,
+		allowMPBGPEncodingV4, allowV4Prefixes, allowV6Prefixes)
 }
