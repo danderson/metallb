@@ -73,12 +73,14 @@ peer-autodiscovery:
     my-asn: 100
     peer-asn: 200
     peer-address: 10.0.0.1
+    source-address: 10.0.0.2
     peer-port: 1179
     hold-time: 180s
   from-annotations:
   - my-asn: example.com/my-asn
     peer-asn: example.com/peer-asn
     peer-address: example.com/peer-address
+    source-address: example.com/source-address
     peer-port: example.com/peer-port
     hold-time: example.com/hold-time
     router-id: example.com/router-id
@@ -86,6 +88,7 @@ peer-autodiscovery:
   - my-asn: example.com/my-asn
     peer-asn: example.com/peer-asn
     peer-address: example.com/peer-address
+    source-address: example.com/source-address
     peer-port: example.com/peer-port
     hold-time: example.com/hold-time
     router-id: example.com/router-id
@@ -148,6 +151,7 @@ address-pools:
 						MyASN:    100,
 						ASN:      200,
 						Addr:     net.ParseIP("10.0.0.1"),
+						SrcAddr:  net.ParseIP("10.0.0.2"),
 						Port:     1179,
 						HoldTime: 180 * time.Second,
 					},
@@ -156,6 +160,7 @@ address-pools:
 							MyASN:    "example.com/my-asn",
 							ASN:      "example.com/peer-asn",
 							Addr:     "example.com/peer-address",
+							SrcAddr:  "example.com/source-address",
 							Port:     "example.com/peer-port",
 							HoldTime: "example.com/hold-time",
 							RouterID: "example.com/router-id",
@@ -166,6 +171,7 @@ address-pools:
 							MyASN:    "example.com/my-asn",
 							ASN:      "example.com/peer-asn",
 							Addr:     "example.com/peer-address",
+							SrcAddr:  "example.com/source-address",
 							Port:     "example.com/peer-port",
 							HoldTime: "example.com/hold-time",
 							RouterID: "example.com/router-id",
@@ -781,6 +787,7 @@ peer-autodiscovery:
     my-asn: 100
     peer-asn: 200
     peer-address: 10.0.0.1
+    source-address: 10.0.0.2
     peer-port: 1179
     hold-time: 30s
     router-id: 10.0.0.2
@@ -794,6 +801,7 @@ peer-autodiscovery:
 						MyASN:    100,
 						ASN:      200,
 						Addr:     net.ParseIP("10.0.0.1"),
+						SrcAddr:  net.ParseIP("10.0.0.2"),
 						Port:     1179,
 						HoldTime: 30 * time.Second,
 						RouterID: net.ParseIP("10.0.0.2"),

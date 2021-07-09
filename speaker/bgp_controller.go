@@ -558,6 +558,7 @@ func parseNodePeer(l log.Logger, pam *config.PeerAutodiscoveryMapping, d *config
 		myASN       uint32
 		peerASN     uint32
 		peerAddr    net.IP
+		srcAddr     net.IP
 		peerPort    uint16
 		holdTime    time.Duration
 		holdTimeRaw string
@@ -580,6 +581,9 @@ func parseNodePeer(l log.Logger, pam *config.PeerAutodiscoveryMapping, d *config
 		}
 		if d.Addr != nil {
 			peerAddr = d.Addr
+		}
+		if d.SrcAddr != nil {
+			srcAddr = d.SrcAddr
 		}
 		if d.Port != 0 {
 			peerPort = d.Port
@@ -607,6 +611,11 @@ func parseNodePeer(l log.Logger, pam *config.PeerAutodiscoveryMapping, d *config
 			peerAddr = net.ParseIP(v)
 			if peerAddr == nil {
 				return nil, fmt.Errorf("invalid peer IP %q", v)
+			}
+		case pam.SrcAddr:
+			srcAddr = net.ParseIP(v)
+			if srcAddr == nil {
+				return nil, fmt.Errorf("invalid source IP %q", v)
 			}
 		case pam.Port:
 			port, err := strconv.ParseUint(v, 10, 16)
@@ -646,6 +655,7 @@ func parseNodePeer(l log.Logger, pam *config.PeerAutodiscoveryMapping, d *config
 		MyASN:    myASN,
 		ASN:      peerASN,
 		Addr:     peerAddr,
+		SrcAddr:  srcAddr,
 		Port:     peerPort,
 		HoldTime: holdTime,
 		RouterID: routerID,
@@ -659,14 +669,21 @@ func parseNodePeer(l log.Logger, pam *config.PeerAutodiscoveryMapping, d *config
 // isSameSession returns true if the peer configurations a and b would result
 // in the same TCP connection on a node.
 //
-// Two configs would result in the same TCP connection if the node selectors of
-// both a and b match the label set ls AND both the peer address and port are
-// identical between a and b.
+// Two configs would result in the same TCP connection if all of the following
+// conditions are true:
+//
+// - The node selectors of both a and b match the label set ls.
+// - The peer address of a and b is identical.
+// - The source address of a and b is identical.
+// - The port of a and b is identical.
 func isSameSession(a *config.Peer, b *config.Peer, ls labels.Set) bool {
 	if !selectorMatches(ls, a.NodeSelectors) || !selectorMatches(ls, b.NodeSelectors) {
 		return false
 	}
 	if !a.Addr.Equal(b.Addr) {
+		return false
+	}
+	if !a.SrcAddr.Equal(b.SrcAddr) {
 		return false
 	}
 	if a.Port != b.Port {

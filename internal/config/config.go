@@ -69,6 +69,7 @@ type peerAutodiscoveryDefaults struct {
 	MyASN    uint32 `yaml:"my-asn"`
 	ASN      uint32 `yaml:"peer-asn"`
 	Addr     string `yaml:"peer-address"`
+	SrcAddr  string `yaml:"source-address"`
 	Port     uint16 `yaml:"peer-port"`
 	HoldTime string `yaml:"hold-time"`
 	RouterID string `yaml:"router-id"`
@@ -78,6 +79,7 @@ type peerAutodiscoveryMapping struct {
 	MyASN    string `yaml:"my-asn"`
 	ASN      string `yaml:"peer-asn"`
 	Addr     string `yaml:"peer-address"`
+	SrcAddr  string `yaml:"source-address"`
 	Port     string `yaml:"peer-port"`
 	HoldTime string `yaml:"hold-time"`
 	RouterID string `yaml:"router-id"`
@@ -161,6 +163,8 @@ type PeerAutodiscoveryDefaults struct {
 	ASN uint32
 	// Address to dial when establishing the session.
 	Addr net.IP
+	// Source address to use when establishing the session.
+	SrcAddr net.IP
 	// Port to dial when establishing the session.
 	Port uint16
 	// Requested BGP hold time, per RFC4271.
@@ -189,6 +193,7 @@ type PeerAutodiscoveryMapping struct {
 	MyASN    string
 	ASN      string
 	Addr     string
+	SrcAddr  string
 	Port     string
 	HoldTime string
 	RouterID string
@@ -457,6 +462,7 @@ func parsePeerAutodiscovery(p peerAutodiscovery) (*PeerAutodiscovery, error) {
 		pad.Defaults.ASN = p.Defaults.ASN
 		pad.Defaults.MyASN = p.Defaults.MyASN
 		pad.Defaults.Addr = net.ParseIP(p.Defaults.Addr)
+		pad.Defaults.SrcAddr = net.ParseIP(p.Defaults.SrcAddr)
 		pad.Defaults.Port = p.Defaults.Port
 		pad.Defaults.RouterID = net.ParseIP(p.Defaults.RouterID)
 
@@ -474,6 +480,7 @@ func parsePeerAutodiscovery(p peerAutodiscovery) (*PeerAutodiscovery, error) {
 			pad.FromAnnotations = append(pad.FromAnnotations, &PeerAutodiscoveryMapping{
 				ASN:      pam.ASN,
 				Addr:     pam.Addr,
+				SrcAddr:  pam.SrcAddr,
 				HoldTime: pam.HoldTime,
 				MyASN:    pam.MyASN,
 				Port:     pam.Port,
@@ -487,6 +494,7 @@ func parsePeerAutodiscovery(p peerAutodiscovery) (*PeerAutodiscovery, error) {
 			pad.FromLabels = append(pad.FromLabels, &PeerAutodiscoveryMapping{
 				ASN:      pam.ASN,
 				Addr:     pam.Addr,
+				SrcAddr:  pam.SrcAddr,
 				HoldTime: pam.HoldTime,
 				MyASN:    pam.MyASN,
 				Port:     pam.Port,

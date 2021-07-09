@@ -121,6 +121,7 @@ data:
       - my-asn: example.com/my-asn
         peer-asn: example.com/peer-asn
         peer-address: example.com/peer-address
+        source-address: example.com/source-address
         peer-port: example.com/peer-port
         hold-time: example.com/hold-time
         router-id: example.com/router-id
@@ -130,6 +131,7 @@ data:
       - my-asn: example.com/my-asn
         peer-asn: example.com/peer-asn
         peer-address: example.com/peer-address
+        source-address: example.com/source-address
         peer-port: example.com/peer-port
         hold-time: example.com/hold-time
         router-id: example.com/router-id
