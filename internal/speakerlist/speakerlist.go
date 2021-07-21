@@ -14,6 +14,8 @@ package speakerlist
 
 import (
 	"crypto/sha256"
+	"errors"
+	"reflect"
 	"strconv"
 	"sync"
 	"time"
@@ -27,32 +29,29 @@ import (
 
 // SpeakerList represents a list of healthy speakers.
 type SpeakerList struct {
-	l         log.Logger
-	client    *k8s.Client
-	stopCh    chan struct{}
-	namespace string
-	labels    string
-
+	sync.Mutex  // Must be locked while accessing any of the internal SpeakerList maps or arrays.
+	l           log.Logger
+	k8sSpeakers map[string]string
+	resyncSvcCh chan struct{}
 	// The following fields are nil when memberlist is disabled.
-	mlEventCh chan memberlist.NodeEvent
-	ml        *memberlist.Memberlist
-	mlJoinCh  chan struct{}
-
-	mlMux        sync.Mutex // Mutex for mlSpeakerIPs.
-	mlSpeakerIPs []string   // Speaker pod IPs.
+	mlEventCh  chan memberlist.NodeEvent
+	ml         *memberlist.Memberlist
+	mlMembers  map[string]bool // Speakers that are alive according to memberlist.
+	mlJoinCh   chan struct{}
+	mlJoinList []string // A list of IPs of the ready speakers not yet members of the memberlist cluster.
+	stopCh     chan struct{}
 }
 
 // New creates a new SpeakerList and returns a pointer to it.
-func New(logger log.Logger, nodeName, bindAddr, bindPort, secret, namespace, labels string, stopCh chan struct{}) (*SpeakerList, error) {
+func New(logger log.Logger, nodeName, bindAddr, bindPort, secret string, resyncSvcCh chan struct{}) (*SpeakerList, error) {
 	sl := SpeakerList{
-		l:         logger,
-		stopCh:    stopCh,
-		namespace: namespace,
-		labels:    labels,
+		l:           logger,
+		k8sSpeakers: map[string]string{},
+		resyncSvcCh: resyncSvcCh,
 	}
 
-	if labels == "" || bindAddr == "" {
-		level.Info(logger).Log("op", "startup", "msg", "not starting fast dead node detection (memberlist), need ml-bindaddr / ml-labels config")
+	if bindAddr == "" {
+		level.Info(logger).Log("op", "startup", "msg", "not starting fast dead node detection (memberlist), need ml-bindaddr config")
 		return &sl, nil
 	}
 
@@ -79,11 +78,6 @@ func New(logger log.Logger, nodeName, bindAddr, bindPort, secret, namespace, lab
 		mconfig.SecretKey = sha.Sum([]byte(secret))[:16]
 	}
 
-	// This channel is used by the Rejoin() method which runs on k8s node
-	// changes. A buffered channel is used to avoid blocking the main goroutine
-	// while waiting for the join operation to complete.
-	sl.mlJoinCh = make(chan struct{}, 1)
-
 	// ChannelEventDelegate hints that it should not block, so make mlEventCh
 	// 'big'.
 	// TODO: See https://github.com/metallb/metallb/issues/716
@@ -97,193 +91,166 @@ func New(logger log.Logger, nodeName, bindAddr, bindPort, secret, namespace, lab
 	}
 
 	sl.ml = ml
+	sl.mlMembers = map[string]bool{}
+	sl.mlJoinList = []string{}
+
+	sl.mlJoinCh = make(chan struct{}, 1)
+	sl.stopCh = make(chan struct{})
+	go sl.memberlistWatchEvents()
+	go sl.joinMembers()
 
 	return &sl, nil
 }
 
-// Start initializes the SpeakerList. This functions must be called before using
-// other SpeakerList methods.
-func (sl *SpeakerList) Start(client *k8s.Client) {
-	// TODO: The k8s client parameter should ideally be a parameter to
-	// New(). However, that is not possible today because:
-	//
-	// 1. The newController() function takes the sList as param[1]
-	// 2. The newController() function uses the sList param to create the layer 2 controller[2]
-	// 3. The new Kubernetes client uses the created controller to set the callbacks[3]
-	//
-	// Then, we have a dependency cycle if we add the Kubernetes client to speakerlist.New():
-	//
-	// 1. To create a Kubernetes client we need a controller
-	// 2. The newController() function uses the sList param to create the layer 2 controller[2]
-	// 3. The new Kubernetes client uses the created controller to set the callbacks[3]
-	//
-	// We should probably move the speakerlist code to be an implementation
-	// detail of the Layer 2 controller and, when doing so, try to fix this
-	// problem.
-	//
-	// [1]: https://github.com/metallb/metallb/pull/662/files#diff-60053ad6fecb5a3cfabb6f3d9e720899R109
-	// [2]: https://github.com/metallb/metallb/pull/662/files#diff-60053ad6fecb5a3cfabb6f3d9e720899L232-L251
-	// [3]: https://github.com/metallb/metallb/pull/662/files#diff-60053ad6fecb5a3cfabb6f3d9e720899L160-L162
-
-	sl.client = client
-
-	if sl.ml == nil {
-		return
-	}
-
-	// Initialize sl.mlSpeakerIPs.
-	iplist, err := sl.mlSpeakers()
-	if err != nil {
-		level.Error(sl.l).Log("op", "memberDiscovery", "error", err, "msg", "failed to get pod IPs")
-		iplist = nil
-	}
-
-	sl.mlMux.Lock()
-	sl.mlSpeakerIPs = iplist
-	sl.mlMux.Unlock()
-
-	// Update mlSpeakerIPs in the background.
-	go sl.updateSpeakerIPs()
-
-	go sl.memberlistWatchEvents()
-	go sl.joinMembers()
-}
-
-// updateSpeakerIPs runs forever updating the sl.mlSpeakerIPs slice with the
-// IPs of all the speaker pods. As the function queries the API server, it waits at
-// least 5 minutes between queries to avoid self-induced API server DoS (should
-// be treated with care).
-func (sl *SpeakerList) updateSpeakerIPs() {
-	for {
-		// This either stops the loop or makes sure to wait at least 5
-		// minutes before making another call to sl.mlSpeakers(), which
-		// queries the API server.
-		select {
-		case <-sl.stopCh:
-			return
-		case <-time.After(5 * time.Minute):
-			// This blocks until the API server responds.
-			iplist, err := sl.mlSpeakers()
-			if err != nil {
-				level.Error(sl.l).Log("op", "memberDiscovery", "error", err, "msg", "failed to get pod IPs")
-				continue
-			}
-
-			sl.mlMux.Lock()
-			sl.mlSpeakerIPs = iplist
-			sl.mlMux.Unlock()
-		}
-	}
-}
-
-func (sl *SpeakerList) mlSpeakers() ([]string, error) {
-	// This call blocks until we get a response from the API server.
-	// In the client-go version we are using, there is no way to use a
-	// context. Newer versions of client-go support using a context
-	// in the call sl.client.PodIPs() is using.
-	//
-	// TODO: When updating client-go, this code can be simplified by using a
-	// context in the following way:
-	// If we use a context, we can specify a timeout and then there is no need to
-	// run mlUpdateSpeaker() in the background. We could then call
-	// this function from mlJoin() with a context (timeout) and use
-	// sl.mlSpeakerIPs on failure. On success, we could update
-	// sl.mlSpeakerIPs with the response and continue to do the join.
-	iplist, err := sl.client.PodIPs(sl.namespace, sl.labels)
-	if err != nil {
-		return nil, err
-	}
-
-	return iplist, nil
-}
-
 func (sl *SpeakerList) joinMembers() {
-	// Every one minute, try to rejoin.
-	// This joins nodes that leave the cluster for just a few seconds.
-	// Discovering new IPs (updated by sl.updateSpeakerIPs()) might take a while
-	// longer.
-	ticker := time.NewTicker(1 * time.Minute)
-
 	for {
 		select {
+		case <-sl.mlJoinCh:
+			sl.Lock()
+			joinList := sl.mlJoinList
+			sl.Unlock()
+			if len(joinList) == 0 {
+				// joinList is empty - wait for a new rejoin() call.
+				break
+			}
+			// Join is sequential and TCPTimeout = 10s, so it can take time.
+			n, err := sl.ml.Join(joinList)
+			if err == nil {
+				level.Info(sl.l).Log("op", "ml-join", "msg", "memberlist join", "no. joined", n, "join list", joinList)
+			} else {
+				level.Error(sl.l).Log("op", "ml-join", "msg", "memberlist join", "no. joined", n, "error", err, "join list", joinList)
+			}
+			select {
+			case <-time.After(15 * time.Second):
+				// Wait 15s between join attempts, by calling rejoin() we go to 'case <-sl.mlJoinCh',
+				// so if mlJoinList is not empty after MemberList.Join() we will try joining again,
+				// and if it's empty we will break right away.
+				sl.rejoin()
+			case <-sl.stopCh:
+				return
+			}
 		case <-sl.stopCh:
 			return
-		case <-ticker.C:
-			sl.mlJoin()
-		case <-sl.mlJoinCh:
-			sl.mlJoin()
 		}
 	}
 }
 
-func (sl *SpeakerList) members() map[string]struct{} {
-	members := make(map[string]struct{})
-
-	for _, node := range sl.ml.Members() {
-		ip := node.Addr.String()
-		members[ip] = struct{}{}
+//nolint:godot
+// updateJoinList updates mlJoinList with the IPs of all the ready speakers
+// (i.e. present in k8sSpeakers) that are not alive members of the memberlist cluster
+// (i.e. not present in mlMembers).
+// Must be called with SpeakerList mutex locked.
+func (sl *SpeakerList) updateJoinList() {
+	joinList := []string{}
+	for name, ip := range sl.k8sSpeakers {
+		if !sl.mlMembers[name] {
+			joinList = append(joinList, ip)
+		}
 	}
-
-	return members
+	sl.mlJoinList = joinList
+	if len(joinList) > 0 {
+		sl.rejoin()
+	}
 }
 
-// mlJoin joins speaker pods that are not members of this cluster
-// to the cluster. It performs a memberlist.Join() with the IPs in
-// mlSpeakerIPs that are not members of the cluster.
-func (sl *SpeakerList) mlJoin() {
-	// IPs to be joined to the memberlist cluster.
-	var joinIPs []string
+// SetSpeakers updates k8sSpeakers.
+func (sl *SpeakerList) SetSpeakers(eps k8s.EpsOrSlices) {
+	newmap := map[string]string{}
 
-	members := sl.members()
-
-	sl.mlMux.Lock()
-	defer sl.mlMux.Unlock()
-
-	for _, ip := range sl.mlSpeakerIPs {
-		// If an IP is not a member of the cluster, add it to joinIPs.
-		if _, isMember := members[ip]; !isMember {
-			joinIPs = append(joinIPs, ip)
+	switch eps.Type {
+	case k8s.Eps:
+		for _, subset := range eps.EpVal.Subsets {
+			for _, ep := range subset.Addresses {
+				if ep.NodeName == nil {
+					continue
+				}
+				newmap[*ep.NodeName] = ep.IP
+			}
+		}
+	case k8s.Slices:
+		for _, slice := range eps.SlicesVal {
+			for _, ep := range slice.Endpoints {
+				if !k8s.IsConditionReady(ep.Conditions) {
+					continue
+				}
+				nodeName := ep.Topology["kubernetes.io/hostname"]
+				if nodeName == "" {
+					continue
+				}
+				// (v1beta.Endpoint).Addresses must contain at least one address according to the doc.
+				newmap[nodeName] = ep.Addresses[0]
+			}
 		}
 	}
 
-	if len(joinIPs) == 0 {
-		// Not logging here to avoid spamming the logs.
+	sl.Lock()
+	oldmap := sl.k8sSpeakers
+	sl.Unlock()
+	if reflect.DeepEqual(oldmap, newmap) {
 		return
 	}
 
-	nr, err := sl.ml.Join(joinIPs)
-	if err != nil || nr != len(joinIPs) {
-		level.Error(sl.l).Log("op", "memberDiscovery", "msg", "partial join", "joined", nr, "expected", len(joinIPs), "error", err)
-	} else {
-		level.Info(sl.l).Log("op", "Member detection", "msg", "memberlist join succesfully", "number of other nodes", nr)
+	added := map[string]string{}
+	removed := map[string]string{}
+	for k, v := range newmap {
+		if _, ok := oldmap[k]; !ok {
+			added[k] = v
+		}
 	}
-}
+	for k, v := range oldmap {
+		if _, ok := newmap[k]; !ok {
+			removed[k] = v
+		}
+	}
+	level.Info(sl.l).Log("op", "SetSpeakers", "msg", "New K8s speakers list set", "added", added, "removed", removed)
 
-// Rejoin initiates a discovery and joins all the speakers to the memberlist
-// cluster.
-func (sl *SpeakerList) Rejoin() {
+	sl.Lock()
+	sl.k8sSpeakers = newmap
+	if sl.ml != nil {
+		sl.updateJoinList()
+	}
+	sl.Unlock()
+
 	if sl.ml == nil {
-		return
+		// We normally resync all the services on memberlist events (member left/joined).
+		// When memberlist is disabled, we need to resync the services as UsableSpeakers()
+		// return value just changed.
+		sl.forceSvcSync()
 	}
+}
 
+func (sl *SpeakerList) rejoin() {
 	select {
 	case sl.mlJoinCh <- struct{}{}:
-		level.Info(sl.l).Log("op", "memberDiscovery", "msg", "triggering discovery")
 	default:
-		level.Debug(sl.l).Log("op", "memberDiscovery", "msg", "previous discovery in progress - doing nothing")
+		// mlJoinCh has a capacity of 1. If this channel is full (i.e. blocks when we try to send),
+		// there is no need to queue another join operation, therefore we drop it.
 	}
 }
 
-// UsableSpeakers returns a map of usable speaker nodes.
-func (sl *SpeakerList) UsableSpeakers() map[string]bool {
-	if sl.ml == nil {
-		return nil
+// UsableSpeakers returns a map of usable nodes or an error.
+func (sl *SpeakerList) UsableSpeakers() (map[string]bool, error) {
+	sl.Lock()
+	defer sl.Unlock()
+	if len(sl.k8sSpeakers) == 0 {
+		return nil, errors.New("k8sSpeakersNotSetYet")
 	}
 	activeNodes := map[string]bool{}
-	for _, n := range sl.ml.Members() {
-		activeNodes[n.Name] = true
+	if sl.ml == nil {
+		// memberlist is disabled, return the ready speakers from k8s.
+		for name := range sl.k8sSpeakers {
+			activeNodes[name] = true
+		}
+	} else {
+		// Return a copy with only the alive nodes.
+		for name, alive := range sl.mlMembers {
+			if alive {
+				activeNodes[name] = true
+			}
+		}
 	}
-	return activeNodes
+
+	return activeNodes, nil
 }
 
 // Stop stops the SpeakerList.
@@ -292,6 +259,7 @@ func (sl *SpeakerList) Stop() {
 		return
 	}
 
+	close(sl.stopCh)
 	level.Info(sl.l).Log("op", "shutdown", "msg", "leaving memberlist cluster")
 	err := sl.ml.Leave(time.Second)
 	level.Info(sl.l).Log("op", "shutdown", "msg", "left memberlist cluster", "error", err)
@@ -307,10 +275,30 @@ func (sl *SpeakerList) memberlistWatchEvents() {
 	for {
 		select {
 		case e := <-sl.mlEventCh:
-			level.Info(sl.l).Log("msg", "node event - forcing sync", "node addr", e.Node.Addr, "node name", e.Node.Name, "node event", event2String(e.Event))
-			sl.client.ForceSync()
+			level.Info(sl.l).Log("msg", "Node event", "node addr", e.Node.Addr, "node name", e.Node.Name, "node event", event2String(e.Event))
+			sl.Lock()
+			if e.Event == memberlist.NodeLeave {
+				delete(sl.mlMembers, e.Node.Name)
+			} else {
+				// If the event is not NodeLeave, the node is alive.
+				sl.mlMembers[e.Node.Name] = true
+			}
+			sl.updateJoinList()
+			sl.Unlock()
+			sl.forceSvcSync()
 		case <-sl.stopCh:
 			return
 		}
+	}
+}
+
+func (sl *SpeakerList) forceSvcSync() {
+	select {
+	case sl.resyncSvcCh <- struct{}{}:
+		level.Debug(sl.l).Log("op", "forceSvcSync", "msg", "Queuing a resync")
+	default:
+		// resyncSvcCh has a capacity of 1, if it's full (it blocks when we try to produce)
+		// there is no need to queue more than 1 resync order, so drop it
+		level.Debug(sl.l).Log("op", "forceSvcSync", "msg", "Resync already queued, dropping")
 	}
 }

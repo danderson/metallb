@@ -194,21 +194,6 @@ kind: Role
 metadata:
   labels:
     app: metallb
-  name: pod-lister
-  namespace: metallb-system
-rules:
-- apiGroups:
-  - ''
-  resources:
-  - pods
-  verbs:
-  - list
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  labels:
-    app: metallb
   name: controller
   namespace: metallb-system
 rules:
@@ -282,20 +267,19 @@ subjects:
 - kind: ServiceAccount
   name: speaker
 ---
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
+apiVersion: v1
+kind: Service
 metadata:
   labels:
     app: metallb
-  name: pod-lister
-  namespace: metallb-system
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: pod-lister
-subjects:
-- kind: ServiceAccount
+    component: speaker
   name: speaker
+  namespace: metallb-system
+spec:
+  selector:
+    app: metallb
+    component: speaker
+  clusterIP: None
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -357,8 +341,8 @@ spec:
         # and the PodSecurityPolicy hostPorts definition
         #- name: METALLB_ML_BIND_PORT
         #  value: "7946"
-        - name: METALLB_ML_LABELS
-          value: "app=metallb,component=speaker"
+        - name: METALLB_SERVICE
+          value: "speaker"
         - name: METALLB_ML_SECRET_KEY
           valueFrom:
             secretKeyRef:

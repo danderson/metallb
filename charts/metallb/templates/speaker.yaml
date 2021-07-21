@@ -60,8 +60,8 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: status.podIP
-        - name: METALLB_ML_LABELS
-          value: "app.kubernetes.io/name={{ include "metallb.name" . }},app.kubernetes.io/component=speaker"
+        - name: METALLB_SERVICE
+          value: "{{ include "metallb.fullname" . }}-speaker-svc"
         - name: METALLB_ML_BIND_PORT
           value: "{{ .Values.speaker.memberlist.mlBindPort }}"
         - name: METALLB_ML_SECRET_KEY
@@ -135,4 +135,16 @@ spec:
         {{- toYaml . | nindent 6 }}
       {{- end }}
       {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "metallb.fullname" . }}-speaker-svc
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "metallb.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "metallb.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: speaker
+  clusterIP: None
 {{- end }}

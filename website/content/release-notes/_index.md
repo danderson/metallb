@@ -26,7 +26,21 @@ Changes in behavior:
   speaker when installing using manifests, or by overriding helm values `controller.logLevel=all` 
   and `speaker.logLevel=all` when installing with Helm.
 
+- MetalLB now uses a headless service to track the speakers. You must
+  configure `METALLB_SERVICE`/`service` and create the service. Manifests and
+  charts provided by MetalLB have been updated to create this new service.
+  If you are using your own manifests, you must update them. ([#595](https://github.com/metallb/metallb/pull/595))
+
+- The `METALLB_ML_LABELS`/`ml-labels` config option has been removed.
+  The `pod-lister` role/rolebinding are not used anymore and have been removed.
+  If you are using MetalLB-provided manifests to deploy, you can clean the old resources up by running
+  `kubectl delete -n metallb-system role/pod-lister rolebinding/pod-lister`. ([#595](https://github.com/metallb/metallb/pull/595))
+
 Bug Fixes:
+
+- MetalLB now only considers ready speakers when memberlist is disabled.
+  This allows `externalTrafficPolicy: cluster` services to work when MetalLB
+  speakers run only on a subset of the nodes. ([#595](https://github.com/metallb/metallb/pull/595))
 
 ## Version 0.10.3
 

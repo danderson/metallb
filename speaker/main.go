@@ -67,11 +67,11 @@ func main() {
 		host       = flag.String("host", os.Getenv("METALLB_HOST"), "HTTP host address")
 		mlBindAddr = flag.String("ml-bindaddr", os.Getenv("METALLB_ML_BIND_ADDR"), "Bind addr for MemberList (fast dead node detection)")
 		mlBindPort = flag.String("ml-bindport", os.Getenv("METALLB_ML_BIND_PORT"), "Bind port for MemberList (fast dead node detection)")
-		mlLabels   = flag.String("ml-labels", os.Getenv("METALLB_ML_LABELS"), "Labels to match the speakers (for MemberList / fast dead node detection)")
 		mlSecret   = flag.String("ml-secret-key", os.Getenv("METALLB_ML_SECRET_KEY"), "Secret key for MemberList (fast dead node detection)")
 		myNode     = flag.String("node-name", os.Getenv("METALLB_NODE_NAME"), "name of this Kubernetes node (spec.nodeName)")
 		port       = flag.Int("port", 7472, "HTTP listening port")
 		logLevel   = flag.String("log-level", "info", fmt.Sprintf("log level. must be one of: [%s]", strings.Join(logging.Levels, ", ")))
+		service    = flag.String("service", os.Getenv("METALLB_SERVICE"), "Service that points to the speakers")
 	)
 	flag.Parse()
 
@@ -97,6 +97,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if *service == "" {
+		level.Error(logger).Log("op", "startup", "error", "must specify --service or METALLB_SERVICE", "msg", "missing configuration")
+		os.Exit(1)
+	}
+
 	stopCh := make(chan struct{})
 	go func() {
 		c1 := make(chan os.Signal, 1)
@@ -108,10 +113,15 @@ func main() {
 	}()
 	defer level.Info(logger).Log("op", "shutdown", "msg", "done")
 
-	sList, err := speakerlist.New(logger, *myNode, *mlBindAddr, *mlBindPort, *mlSecret, *namespace, *mlLabels, stopCh)
+	// Make resyncSvcCh chan buffer 1 event large, so if a resync is ongoing,
+	// we can queue another resync making sure all changes that happened
+	// before we produce to the channel are taken into account.
+	resyncSvcCh := make(chan struct{}, 1)
+	sList, err := speakerlist.New(logger, *myNode, *mlBindAddr, *mlBindPort, *mlSecret, resyncSvcCh)
 	if err != nil {
 		os.Exit(1)
 	}
+	defer sList.Stop()
 
 	// Setup all clients and speakers, config decides what is being done runtime.
 	ctrl, err := newController(controllerConfig{
@@ -127,8 +137,9 @@ func main() {
 	client, err := k8s.New(&k8s.Config{
 		ProcessName:   "metallb-speaker",
 		ConfigMapName: *config,
-		ConfigMapNS:   *namespace,
+		Namespace:     *namespace,
 		NodeName:      *myNode,
+		SpeakerSvc:    *service,
 		Logger:        logger,
 		Kubeconfig:    *kubeconfig,
 
@@ -139,15 +150,15 @@ func main() {
 		ServiceChanged: ctrl.SetBalancer,
 		ConfigChanged:  ctrl.SetConfig,
 		NodeChanged:    ctrl.SetNode,
+		SpeakerChanged: ctrl.SetSpeakers,
+
+		ResyncSvcCh: resyncSvcCh,
 	})
 	if err != nil {
 		level.Error(logger).Log("op", "startup", "error", err, "msg", "failed to create k8s client")
 		os.Exit(1)
 	}
 	ctrl.client = client
-
-	sList.Start(client)
-	defer sList.Stop()
 
 	if err := client.Run(stopCh); err != nil {
 		level.Error(logger).Log("op", "startup", "error", err, "msg", "failed to run k8s client")
@@ -367,6 +378,16 @@ func (c *controller) SetNode(l log.Logger, node *v1.Node) k8s.SyncState {
 	return k8s.SyncStateSuccess
 }
 
+func (c *controller) SetSpeakers(l log.Logger, eps k8s.EpsOrSlices) k8s.SyncState {
+	for proto, handler := range c.protocols {
+		if err := handler.SetSpeakers(l, eps); err != nil {
+			level.Error(l).Log("op", "SetSpeakers", "error", err, "protocol", proto, "msg", "failed to propagate speaker info to protocol handler")
+			return k8s.SyncStateError
+		}
+	}
+	return k8s.SyncStateSuccess
+}
+
 // A Protocol can advertise an IP address.
 type Protocol interface {
 	SetConfig(log.Logger, *config.Config) error
@@ -374,10 +395,11 @@ type Protocol interface {
 	SetBalancer(log.Logger, string, net.IP, *config.Pool) error
 	DeleteBalancer(log.Logger, string, string) error
 	SetNode(log.Logger, *v1.Node) error
+	SetSpeakers(log.Logger, k8s.EpsOrSlices) error
 }
 
-// Speakerlist represents a list of healthy speakers.
+// SpeakerList takes speakers from k8s and returns usable speakers.
 type SpeakerList interface {
-	UsableSpeakers() map[string]bool
-	Rejoin()
+	UsableSpeakers() (map[string]bool, error)
+	SetSpeakers(eps k8s.EpsOrSlices)
 }

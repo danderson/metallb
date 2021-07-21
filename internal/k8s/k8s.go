@@ -47,11 +47,16 @@ type Client struct {
 	nodeIndexer    cache.Indexer
 	nodeInformer   cache.Controller
 
+	resyncSvcCh <-chan struct{}
+
 	syncFuncs []cache.InformerSynced
+
+	speakerSvc string
 
 	serviceChanged func(log.Logger, string, *v1.Service, EpsOrSlices) SyncState
 	configChanged  func(log.Logger, *config.Config) SyncState
 	nodeChanged    func(log.Logger, *v1.Node) SyncState
+	speakerChanged func(log.Logger, EpsOrSlices) SyncState
 	synced         func(log.Logger)
 }
 
@@ -74,8 +79,9 @@ const (
 type Config struct {
 	ProcessName   string
 	ConfigMapName string
-	ConfigMapNS   string
+	Namespace     string
 	NodeName      string
+	SpeakerSvc    string // Only used if ServiceChanged is set and ReadEndpoints = true.
 	MetricsHost   string
 	MetricsPort   int
 	ReadEndpoints bool
@@ -85,7 +91,10 @@ type Config struct {
 	ServiceChanged func(log.Logger, string, *v1.Service, EpsOrSlices) SyncState
 	ConfigChanged  func(log.Logger, *config.Config) SyncState
 	NodeChanged    func(log.Logger, *v1.Node) SyncState
+	SpeakerChanged func(log.Logger, EpsOrSlices) SyncState
 	Synced         func(log.Logger)
+
+	ResyncSvcCh <-chan struct{}
 }
 
 type svcKey string
@@ -130,10 +139,11 @@ func New(cfg *Config) (*Client, error) {
 	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
 
 	c := &Client{
-		logger: cfg.Logger,
-		client: clientset,
-		events: recorder,
-		queue:  queue,
+		logger:      cfg.Logger,
+		client:      clientset,
+		events:      recorder,
+		queue:       queue,
+		resyncSvcCh: cfg.ResyncSvcCh,
 	}
 
 	if cfg.ServiceChanged != nil {
@@ -238,6 +248,9 @@ func New(cfg *Config) (*Client, error) {
 				})
 				c.syncFuncs = append(c.syncFuncs, c.slicesInformer.HasSynced)
 			}
+
+			c.speakerSvc = cfg.Namespace + "/" + cfg.SpeakerSvc
+			c.speakerChanged = cfg.SpeakerChanged
 		}
 	}
 
@@ -262,7 +275,7 @@ func New(cfg *Config) (*Client, error) {
 				}
 			},
 		}
-		cmWatcher := cache.NewListWatchFromClient(c.client.CoreV1().RESTClient(), "configmaps", cfg.ConfigMapNS, fields.OneTermEqualSelector("metadata.name", cfg.ConfigMapName))
+		cmWatcher := cache.NewListWatchFromClient(c.client.CoreV1().RESTClient(), "configmaps", cfg.Namespace, fields.OneTermEqualSelector("metadata.name", cfg.ConfigMapName))
 		c.cmIndexer, c.cmInformer = cache.NewIndexerInformer(cmWatcher, &v1.ConfigMap{}, 0, cmHandlers, cache.Indexers{})
 
 		c.configChanged = cfg.ConfigChanged
@@ -367,19 +380,6 @@ func (c *Client) CreateMlSecret(namespace, controllerDeploymentName, secretName 
 	return err
 }
 
-// PodIPs returns the IPs of all the pods matched by the labels string.
-func (c *Client) PodIPs(namespace, labels string) ([]string, error) {
-	pl, err := c.client.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{LabelSelector: labels})
-	if err != nil {
-		return nil, err
-	}
-	iplist := []string{}
-	for _, pod := range pl.Items {
-		iplist = append(iplist, pod.Status.PodIP)
-	}
-	return iplist, nil
-}
-
 // Run watches for events on the Kubernetes cluster, and dispatches
 // calls to the Controller.
 func (c *Client) Run(stopCh <-chan struct{}) error {
@@ -412,6 +412,19 @@ func (c *Client) Run(stopCh <-chan struct{}) error {
 		}()
 	}
 
+	if c.resyncSvcCh != nil || stopCh != nil {
+		go func() {
+			for {
+				select {
+				case <-stopCh:
+					return
+				case <-c.resyncSvcCh:
+					c.resyncSvc()
+				}
+			}
+		}()
+	}
+
 	for {
 		key, quit := c.queue.Get()
 		if quit {
@@ -427,13 +440,14 @@ func (c *Client) Run(stopCh <-chan struct{}) error {
 			c.queue.AddRateLimited(key)
 		case SyncStateReprocessAll:
 			c.queue.Forget(key)
-			c.ForceSync()
+			c.resyncSvc()
 		}
 	}
 }
 
-// ForceSync reprocess all watched services.
-func (c *Client) ForceSync() {
+// resyncSvc reprocesses all watched services.
+func (c *Client) resyncSvc() {
+	level.Debug(c.logger).Log("op", "resyncSvc")
 	if c.svcIndexer != nil {
 		for _, k := range c.svcIndexer.ListKeys() {
 			c.queue.AddRateLimited(svcKey(k))
@@ -507,6 +521,11 @@ func (c *Client) sync(key interface{}) SyncState {
 			}
 			epsOrSlices.Type = Slices
 		}
+
+		if string(k) == c.speakerSvc && c.speakerChanged != nil {
+			return c.speakerChanged(c.logger, epsOrSlices)
+		}
+
 		return c.serviceChanged(l, string(k), svc.(*v1.Service), epsOrSlices)
 
 	case cmKey:

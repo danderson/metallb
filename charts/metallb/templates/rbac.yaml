@@ -56,17 +56,6 @@ rules:
 - apiGroups: [""]
   resources: ["configmaps"]
   verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: {{ include "metallb.fullname" . }}-pod-lister
-  namespace: {{ .Release.Namespace }}
-  labels: {{- include "metallb.labels" . | nindent 4 }}
-rules:
-- apiGroups: [""]
-  resources: ["pods"]
-  verbs: ["list"]
 {{- if .Values.speaker.memberlist.enabled }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -135,20 +124,6 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: {{ template "metallb.fullname" . }}-config-watcher
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: {{ include "metallb.fullname" . }}-pod-lister
-  namespace: {{ .Release.Namespace }}
-  labels: {{- include "metallb.labels" . | nindent 4 }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: Role
-  name: {{ include "metallb.fullname" . }}-pod-lister
-subjects:
-- kind: ServiceAccount
-  name: {{ include "metallb.speaker.serviceAccountName" . }}
 {{- if .Values.speaker.memberlist.enabled }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

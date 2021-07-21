@@ -41,7 +41,6 @@ func (c *layer2Controller) SetConfig(log.Logger, *config.Config) error {
 // endpoint on them.
 // The speakers parameter is a map with the node name as key and the readiness
 // status as value (true means ready, false means not ready).
-// If the speakers map is nil, it is ignored.
 func usableNodes(eps k8s.EpsOrSlices, speakers map[string]bool) []string {
 	usable := map[string]bool{}
 	switch eps.Type {
@@ -51,10 +50,8 @@ func usableNodes(eps k8s.EpsOrSlices, speakers map[string]bool) []string {
 				if ep.NodeName == nil {
 					continue
 				}
-				if speakers != nil {
-					if ready, ok := speakers[*ep.NodeName]; !ok || !ready {
-						continue
-					}
+				if ready, ok := speakers[*ep.NodeName]; !ok || !ready {
+					continue
 				}
 				if _, ok := usable[*ep.NodeName]; !ok {
 					usable[*ep.NodeName] = true
@@ -71,10 +68,8 @@ func usableNodes(eps k8s.EpsOrSlices, speakers map[string]bool) []string {
 				if nodeName == "" {
 					continue
 				}
-				if speakers != nil {
-					if ready, ok := speakers[nodeName]; !ok || !ready {
-						continue
-					}
+				if ready, ok := speakers[nodeName]; !ok || !ready {
+					continue
 				}
 				if _, ok := usable[nodeName]; !ok {
 					usable[nodeName] = true
@@ -94,7 +89,11 @@ func usableNodes(eps k8s.EpsOrSlices, speakers map[string]bool) []string {
 }
 
 func (c *layer2Controller) ShouldAnnounce(l log.Logger, name string, svc *v1.Service, eps k8s.EpsOrSlices) string {
-	nodes := usableNodes(eps, c.sList.UsableSpeakers())
+	usableSpeakers, err := c.sList.UsableSpeakers()
+	if err != nil {
+		return err.Error()
+	}
+	nodes := usableNodes(eps, usableSpeakers)
 	// Sort the slice by the hash of node + service name. This
 	// produces an ordering of ready nodes that is unique to this
 	// service.
@@ -128,6 +127,10 @@ func (c *layer2Controller) DeleteBalancer(l log.Logger, name, reason string) err
 }
 
 func (c *layer2Controller) SetNode(log.Logger, *v1.Node) error {
-	c.sList.Rejoin()
+	return nil
+}
+
+func (c *layer2Controller) SetSpeakers(l log.Logger, eps k8s.EpsOrSlices) error {
+	c.sList.SetSpeakers(eps)
 	return nil
 }

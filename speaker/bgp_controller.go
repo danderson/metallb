@@ -295,3 +295,7 @@ func (c *bgpController) SetNode(l log.Logger, node *v1.Node) error {
 var newBGP = func(logger log.Logger, addr string, srcAddr net.IP, myASN uint32, routerID net.IP, asn uint32, hold time.Duration, password string, myNode string) (session, error) {
 	return bgp.New(logger, addr, srcAddr, myASN, routerID, asn, hold, password, myNode)
 }
+
+func (c *bgpController) SetSpeakers(l log.Logger, eps k8s.EpsOrSlices) error {
+	return nil
+}
