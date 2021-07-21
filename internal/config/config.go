@@ -29,12 +29,21 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 )
 
+const (
+	// DefaultBGPHoldTime is the default hold time value (in seconds) used for
+	// BGP peers.
+	DefaultBGPHoldTime = 90
+	// DefautBGPPeerPort is the default remote port used for BGP peers.
+	DefautBGPPeerPort = 179
+)
+
 // configFile is the configuration as parsed out of the ConfigMap,
 // without validation or useful high level types.
 type configFile struct {
-	Peers          []peer
-	BGPCommunities map[string]string `yaml:"bgp-communities"`
-	Pools          []addressPool     `yaml:"address-pools"`
+	Peers             []peer
+	PeerAutodiscovery *peerAutodiscovery `yaml:"peer-autodiscovery"`
+	BGPCommunities    map[string]string  `yaml:"bgp-communities"`
+	Pools             []addressPool      `yaml:"address-pools"`
 }
 
 type peer struct {
@@ -47,6 +56,33 @@ type peer struct {
 	RouterID      string         `yaml:"router-id"`
 	NodeSelectors []nodeSelector `yaml:"node-selectors"`
 	Password      string         `yaml:"password"`
+}
+
+type peerAutodiscovery struct {
+	Defaults        *peerAutodiscoveryDefaults  `yaml:"defaults"`
+	NodeSelectors   []nodeSelector              `yaml:"node-selectors"`
+	FromAnnotations []*peerAutodiscoveryMapping `yaml:"from-annotations"`
+	FromLabels      []*peerAutodiscoveryMapping `yaml:"from-labels"`
+}
+
+type peerAutodiscoveryDefaults struct {
+	MyASN    uint32 `yaml:"my-asn"`
+	ASN      uint32 `yaml:"peer-asn"`
+	Addr     string `yaml:"peer-address"`
+	SrcAddr  string `yaml:"source-address"`
+	Port     uint16 `yaml:"peer-port"`
+	HoldTime string `yaml:"hold-time"`
+	RouterID string `yaml:"router-id"`
+}
+
+type peerAutodiscoveryMapping struct {
+	MyASN    string `yaml:"my-asn"`
+	ASN      string `yaml:"peer-asn"`
+	Addr     string `yaml:"peer-address"`
+	SrcAddr  string `yaml:"source-address"`
+	Port     string `yaml:"peer-port"`
+	HoldTime string `yaml:"hold-time"`
+	RouterID string `yaml:"router-id"`
 }
 
 type nodeSelector struct {
@@ -79,6 +115,8 @@ type bgpAdvertisement struct {
 type Config struct {
 	// Routers that MetalLB should peer with.
 	Peers []*Peer
+	// Peer autodiscovery configuration.
+	PeerAutodiscovery *PeerAutodiscovery
 	// Address pools from which to allocate load balancer IPs.
 	Pools map[string]*Pool
 }
@@ -114,6 +152,76 @@ type Peer struct {
 	// Authentication password for routers enforcing TCP MD5 authenticated sessions
 	Password string
 	// TODO: more BGP session settings
+}
+
+// PeerAutodiscoveryDefaults specifies BGP peering parameters which can be set
+// globally for all autodiscovered peers.
+type PeerAutodiscoveryDefaults struct {
+	// AS number to use for the local end of the session.
+	MyASN uint32
+	// AS number to expect from the remote end of the session.
+	ASN uint32
+	// Address to dial when establishing the session.
+	Addr net.IP
+	// Source address to use when establishing the session.
+	SrcAddr net.IP
+	// Port to dial when establishing the session.
+	Port uint16
+	// Requested BGP hold time, per RFC4271.
+	HoldTime time.Duration
+	// BGP router ID to advertise to the peer.
+	RouterID net.IP
+}
+
+// PeerAutodiscoveryMapping maps BGP peering configuration parameters to node
+// annotations or labels to allow automatic discovery of BGP configuration
+// from Node objects.
+//
+// All the fields are strings because the values of a PeerAutodiscoveryMapping
+// are annotation/label keys rather than the BGP parameters themselves. The
+// controller uses the PeerAutodiscoveryMapping to figure out which annotations
+// or labels to get the BGP parameters from for a given node peer.
+//
+// For example, setting MyASN to example.com/my-asn means "look for an
+// annotation or label with the key example.com/my-asn on a Node object and use
+// its value as the local ASN when constructing a BGP peer".
+//
+// Whether to use annotations or labels is out of scope for this type: since
+// both annotations and labels use string keys, a PeerAutodiscoveryMapping can
+// be used to map BGP parameters to either annotations or labels.
+type PeerAutodiscoveryMapping struct {
+	MyASN    string
+	ASN      string
+	Addr     string
+	SrcAddr  string
+	Port     string
+	HoldTime string
+	RouterID string
+}
+
+// PeerAutodiscovery defines automatic discovery of BGP peers using annotations
+// and/or labels. It allows the user to tell MetalLB to retrieve BGP peering
+// configuration dynamically rather than from a static configuration file.
+type PeerAutodiscovery struct {
+	// Defaults specifies BGP peering parameters which should be used for all
+	// autodiscovered peers. The default value of a parameter is used when the
+	// same parameter isn't specified in annotations/labels on the Node object.
+	Defaults *PeerAutodiscoveryDefaults
+	// FromAnnotations tells MetalLB to retrieve BGP peering configuration for
+	// a node by looking up specific annotations on the corresponding Node
+	// object. Multiple mappings can be specified in order to discover multiple
+	// BGP peers.
+	FromAnnotations []*PeerAutodiscoveryMapping
+	// FromLabels tells MetalLB to retrieve BGP peering configuration for
+	// a node by looking up specific labels on the corresponding Node object.
+	// Multiple mappings can be specified in order to discover multiple BGP
+	// peers.
+	FromLabels []*PeerAutodiscoveryMapping
+	// NodeSelectors indicates the nodes for which peer autodiscovery should be
+	// enabled. Autodiscovery is performed only for nodes whose label set
+	// matches the specified selectors. When no selectors are specified,
+	// autodiscovery is performed for all nodes.
+	NodeSelectors []labels.Selector
 }
 
 // Pool is the configuration of an IP address pool.
@@ -176,10 +284,29 @@ func parseNodeSelector(ns *nodeSelector) (labels.Selector, error) {
 	return metav1.LabelSelectorAsSelector(sel)
 }
 
-func parseHoldTime(ht string) (time.Duration, error) {
-	if ht == "" {
-		return 90 * time.Second, nil
+// parseNodeSelectors parses the provided nodeSelector slice ns and returns a
+// slice of Selectors which can be used to match against labels. If ns is
+// empty, a "match everything" Selector is returned.
+func parseNodeSelectors(ns []nodeSelector) ([]labels.Selector, error) {
+	if len(ns) == 0 {
+		return []labels.Selector{labels.Everything()}, nil
 	}
+
+	nodeSels := []labels.Selector{}
+	for _, sel := range ns {
+		nodeSel, err := parseNodeSelector(&sel)
+		if err != nil {
+			return nil, fmt.Errorf("parsing node selector: %w", err)
+		}
+		nodeSels = append(nodeSels, nodeSel)
+	}
+
+	return nodeSels, nil
+}
+
+// ParseHoldTime parses the provided string into a BGP hold time value
+// represented as a time.Duration.
+func ParseHoldTime(ht string) (time.Duration, error) {
 	d, err := time.ParseDuration(ht)
 	if err != nil {
 		return 0, fmt.Errorf("invalid hold time %q: %s", ht, err)
@@ -213,6 +340,14 @@ func Parse(bs []byte) (*Config, error) {
 			}
 		}
 		cfg.Peers = append(cfg.Peers, peer)
+	}
+
+	if raw.PeerAutodiscovery != nil {
+		pad, err := parsePeerAutodiscovery(*raw.PeerAutodiscovery)
+		if err != nil {
+			return nil, fmt.Errorf("parsing peer autodiscovery: %w", err)
+		}
+		cfg.PeerAutodiscovery = pad
 	}
 
 	communities := map[string]uint32{}
@@ -263,11 +398,15 @@ func parsePeer(p peer) (*Peer, error) {
 	if ip == nil {
 		return nil, fmt.Errorf("invalid peer IP %q", p.Addr)
 	}
-	holdTime, err := parseHoldTime(p.HoldTime)
-	if err != nil {
-		return nil, err
+	holdTime := DefaultBGPHoldTime * time.Second
+	if p.HoldTime != "" {
+		ht, err := ParseHoldTime(p.HoldTime)
+		if err != nil {
+			return nil, err
+		}
+		holdTime = ht
 	}
-	port := uint16(179)
+	port := uint16(DefautBGPPeerPort)
 	if p.Port != 0 {
 		port = p.Port
 	}
@@ -286,20 +425,9 @@ func parsePeer(p peer) (*Peer, error) {
 		return nil, fmt.Errorf("invalid source IP %q", p.SrcAddr)
 	}
 
-	// We use a non-pointer in the raw json object, so that if the
-	// user doesn't provide a node selector, we end up with an empty,
-	// but non-nil selector, which means "select everything".
-	var nodeSels []labels.Selector
-	if len(p.NodeSelectors) == 0 {
-		nodeSels = []labels.Selector{labels.Everything()}
-	} else {
-		for _, sel := range p.NodeSelectors {
-			nodeSel, err := parseNodeSelector(&sel)
-			if err != nil {
-				return nil, fmt.Errorf("parsing node selector: %s", err)
-			}
-			nodeSels = append(nodeSels, nodeSel)
-		}
+	nodeSels, err := parseNodeSelectors(p.NodeSelectors)
+	if err != nil {
+		return nil, err
 	}
 
 	var password string
@@ -317,6 +445,75 @@ func parsePeer(p peer) (*Peer, error) {
 		NodeSelectors: nodeSels,
 		Password:      password,
 	}, nil
+}
+
+// parsePeerAutodiscovery parses peer autodiscovery configuration, constructs
+// a PeerAutodiscovery and returns a pointer to it.
+func parsePeerAutodiscovery(p peerAutodiscovery) (*PeerAutodiscovery, error) {
+	pad := &PeerAutodiscovery{
+		Defaults: &PeerAutodiscoveryDefaults{},
+	}
+
+	if p.FromAnnotations == nil && p.FromLabels == nil {
+		return nil, errors.New("missing from-annotations or from-labels")
+	}
+
+	if p.Defaults != nil {
+		pad.Defaults.ASN = p.Defaults.ASN
+		pad.Defaults.MyASN = p.Defaults.MyASN
+		pad.Defaults.Addr = net.ParseIP(p.Defaults.Addr)
+		pad.Defaults.SrcAddr = net.ParseIP(p.Defaults.SrcAddr)
+		pad.Defaults.Port = p.Defaults.Port
+		pad.Defaults.RouterID = net.ParseIP(p.Defaults.RouterID)
+
+		if p.Defaults.HoldTime != "" {
+			ht, err := ParseHoldTime(p.Defaults.HoldTime)
+			if err != nil {
+				return nil, fmt.Errorf("parsing default hold time: %w", err)
+			}
+			pad.Defaults.HoldTime = ht
+		}
+	}
+
+	if p.FromAnnotations != nil {
+		for _, pam := range p.FromAnnotations {
+			pad.FromAnnotations = append(pad.FromAnnotations, &PeerAutodiscoveryMapping{
+				ASN:      pam.ASN,
+				Addr:     pam.Addr,
+				SrcAddr:  pam.SrcAddr,
+				HoldTime: pam.HoldTime,
+				MyASN:    pam.MyASN,
+				Port:     pam.Port,
+				RouterID: pam.RouterID,
+			})
+		}
+	}
+
+	if p.FromLabels != nil {
+		for _, pam := range p.FromLabels {
+			pad.FromLabels = append(pad.FromLabels, &PeerAutodiscoveryMapping{
+				ASN:      pam.ASN,
+				Addr:     pam.Addr,
+				SrcAddr:  pam.SrcAddr,
+				HoldTime: pam.HoldTime,
+				MyASN:    pam.MyASN,
+				Port:     pam.Port,
+				RouterID: pam.RouterID,
+			})
+		}
+	}
+
+	nodeSels, err := parseNodeSelectors(p.NodeSelectors)
+	if err != nil {
+		return nil, err
+	}
+	pad.NodeSelectors = nodeSels
+
+	if err := validatePeerAutodiscovery(*pad); err != nil {
+		return nil, fmt.Errorf("validating peer autodiscovery: %w", err)
+	}
+
+	return pad, nil
 }
 
 func parseAddressPool(p addressPool, bgpCommunities map[string]uint32) (*Pool, error) {
@@ -483,4 +680,38 @@ func cidrContainsCIDR(outer, inner *net.IPNet) bool {
 		return true
 	}
 	return false
+}
+
+// validatePeerAutodiscovery verifies that peer autodiscovery config is
+// specified for all required BGP params, or that default values are in place.
+func validatePeerAutodiscovery(p PeerAutodiscovery) error {
+	if p.FromAnnotations != nil {
+		for i, m := range p.FromAnnotations {
+			if m.MyASN == "" && p.Defaults.MyASN == 0 {
+				return fmt.Errorf("peer autodiscovery annotations mapping %d: local ASN missing and no default specified", i)
+			}
+			if m.ASN == "" && p.Defaults.ASN == 0 {
+				return fmt.Errorf("peer autodiscovery annotations mapping %d: peer ASN missing and no default specified", i)
+			}
+			if m.Addr == "" && p.Defaults.Addr == nil {
+				return fmt.Errorf("peer autodiscovery annotations mapping %d: peer address missing and no default specified", i)
+			}
+		}
+	}
+
+	if p.FromLabels != nil {
+		for i, m := range p.FromLabels {
+			if m.MyASN == "" && p.Defaults.MyASN == 0 {
+				return fmt.Errorf("peer autodiscovery labels mapping %d: local ASN missing and no default specified", i)
+			}
+			if m.ASN == "" && p.Defaults.ASN == 0 {
+				return fmt.Errorf("peer autodiscovery labels mapping %d: peer ASN missing and no default specified", i)
+			}
+			if m.Addr == "" && p.Defaults.Addr == nil {
+				return fmt.Errorf("peer autodiscovery labels mapping %d: peer address missing and no default specified", i)
+			}
+		}
+	}
+
+	return nil
 }

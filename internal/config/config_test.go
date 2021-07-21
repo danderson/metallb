@@ -63,6 +63,35 @@ peers:
       foo: bar
     match-expressions:
       - {key: bar, operator: In, values: [quux]}
+peer-autodiscovery:
+  node-selectors:
+  - match-labels:
+      foo: bar
+    match-expressions:
+      - {key: bar, operator: In, values: [quux]}
+  defaults:
+    my-asn: 100
+    peer-asn: 200
+    peer-address: 10.0.0.1
+    source-address: 10.0.0.2
+    peer-port: 1179
+    hold-time: 180s
+  from-annotations:
+  - my-asn: example.com/my-asn
+    peer-asn: example.com/peer-asn
+    peer-address: example.com/peer-address
+    source-address: example.com/source-address
+    peer-port: example.com/peer-port
+    hold-time: example.com/hold-time
+    router-id: example.com/router-id
+  from-labels:
+  - my-asn: example.com/my-asn
+    peer-asn: example.com/peer-asn
+    peer-address: example.com/peer-address
+    source-address: example.com/source-address
+    peer-port: example.com/peer-port
+    hold-time: example.com/hold-time
+    router-id: example.com/router-id
 bgp-communities:
   bar: 64512:1234
 address-pools:
@@ -112,6 +141,41 @@ address-pools:
 						Port:          179,
 						HoldTime:      90 * time.Second,
 						NodeSelectors: []labels.Selector{selector("bar in (quux),foo=bar")},
+					},
+				},
+				PeerAutodiscovery: &PeerAutodiscovery{
+					NodeSelectors: []labels.Selector{
+						selector("bar in (quux),foo=bar"),
+					},
+					Defaults: &PeerAutodiscoveryDefaults{
+						MyASN:    100,
+						ASN:      200,
+						Addr:     net.ParseIP("10.0.0.1"),
+						SrcAddr:  net.ParseIP("10.0.0.2"),
+						Port:     1179,
+						HoldTime: 180 * time.Second,
+					},
+					FromAnnotations: []*PeerAutodiscoveryMapping{
+						{
+							MyASN:    "example.com/my-asn",
+							ASN:      "example.com/peer-asn",
+							Addr:     "example.com/peer-address",
+							SrcAddr:  "example.com/source-address",
+							Port:     "example.com/peer-port",
+							HoldTime: "example.com/hold-time",
+							RouterID: "example.com/router-id",
+						},
+					},
+					FromLabels: []*PeerAutodiscoveryMapping{
+						{
+							MyASN:    "example.com/my-asn",
+							ASN:      "example.com/peer-asn",
+							Addr:     "example.com/peer-address",
+							SrcAddr:  "example.com/source-address",
+							Port:     "example.com/peer-port",
+							HoldTime: "example.com/hold-time",
+							RouterID: "example.com/router-id",
+						},
 					},
 				},
 				Pools: map[string]*Pool{
@@ -615,6 +679,141 @@ address-pools:
   bgp-advertisements:
   - communities: ["flarb"]
 `,
+		},
+
+		{
+			desc: "Peer autodiscovery - minimal config",
+			raw: `
+peer-autodiscovery:
+  from-annotations:
+  - my-asn: example.com/my-asn
+    peer-asn: example.com/peer-asn
+    peer-address: example.com/peer-address
+`,
+			want: &Config{
+				Pools: map[string]*Pool{},
+				PeerAutodiscovery: &PeerAutodiscovery{
+					Defaults: &PeerAutodiscoveryDefaults{},
+					FromAnnotations: []*PeerAutodiscoveryMapping{
+						{
+							MyASN: "example.com/my-asn",
+							ASN:   "example.com/peer-asn",
+							Addr:  "example.com/peer-address",
+						},
+					},
+					NodeSelectors: []labels.Selector{labels.Everything()},
+				},
+			},
+		},
+
+		{
+			desc: "Peer autodiscovery - multiple mappings",
+			raw: `
+peer-autodiscovery:
+  from-annotations:
+  - my-asn: example.com/p1-my-asn
+    peer-asn: example.com/p1-peer-asn
+    peer-address: example.com/p1-peer-address
+  - my-asn: example.com/p2-my-asn
+    peer-asn: example.com/p2-peer-asn
+    peer-address: example.com/p2-peer-address
+`,
+			want: &Config{
+				Pools: map[string]*Pool{},
+				PeerAutodiscovery: &PeerAutodiscovery{
+					Defaults: &PeerAutodiscoveryDefaults{},
+					FromAnnotations: []*PeerAutodiscoveryMapping{
+						{
+							MyASN: "example.com/p1-my-asn",
+							ASN:   "example.com/p1-peer-asn",
+							Addr:  "example.com/p1-peer-address",
+						},
+						{
+							MyASN: "example.com/p2-my-asn",
+							ASN:   "example.com/p2-peer-asn",
+							Addr:  "example.com/p2-peer-address",
+						},
+					},
+					NodeSelectors: []labels.Selector{labels.Everything()},
+				},
+			},
+		},
+
+		{
+			desc: "Peer autodiscovery - no mappings",
+			raw: `
+peer-autodiscovery:
+  node-selectors:
+  - match-labels:
+      foo: bar
+`,
+		},
+
+		{
+			desc: "Peer autodiscovery - missing local ASN",
+			raw: `
+peer-autodiscovery:
+  from-annotations:
+  - peer-asn: foo
+    peer-address: bar
+`,
+		},
+
+		{
+			desc: "Peer autodiscovery - missing peer ASN",
+			raw: `
+peer-autodiscovery:
+  from-annotations:
+  - my-asn: foo
+    peer-address: bar
+`,
+		},
+
+		{
+			desc: "Peer autodiscovery - missing peer address",
+			raw: `
+peer-autodiscovery:
+  from-annotations:
+  - peer-asn: foo
+    peer-address: bar
+`,
+		},
+
+		{
+			desc: "Peer autodiscovery - defaults",
+			raw: `
+peer-autodiscovery:
+  defaults:
+    my-asn: 100
+    peer-asn: 200
+    peer-address: 10.0.0.1
+    source-address: 10.0.0.2
+    peer-port: 1179
+    hold-time: 30s
+    router-id: 10.0.0.2
+  from-annotations:
+  - peer-address: foo
+`,
+			want: &Config{
+				Pools: map[string]*Pool{},
+				PeerAutodiscovery: &PeerAutodiscovery{
+					Defaults: &PeerAutodiscoveryDefaults{
+						MyASN:    100,
+						ASN:      200,
+						Addr:     net.ParseIP("10.0.0.1"),
+						SrcAddr:  net.ParseIP("10.0.0.2"),
+						Port:     1179,
+						HoldTime: 30 * time.Second,
+						RouterID: net.ParseIP("10.0.0.2"),
+					},
+					FromAnnotations: []*PeerAutodiscoveryMapping{
+						{
+							Addr: "foo",
+						},
+					},
+					NodeSelectors: []labels.Selector{labels.Everything()},
+				},
+			},
 		},
 	}
 

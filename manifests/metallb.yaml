@@ -336,7 +336,8 @@ spec:
     spec:
       containers:
       - args:
-        - --port=7472
+        - --metrics-port=7472
+        - --status-port=7473
         - --config=config
         - --log-level=info
         env:
@@ -344,7 +345,7 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: spec.nodeName
-        - name: METALLB_HOST
+        - name: METALLB_METRICS_HOST
           valueFrom:
             fieldRef:
               fieldPath: status.hostIP
