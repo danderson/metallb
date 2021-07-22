@@ -267,7 +267,7 @@ func (c *controller) SetBalancer(l log.Logger, name string, svc *v1.Service, eps
 		return c.deleteBalancer(l, name, "internalError")
 	}
 
-	if deleteReason := handler.ShouldAnnounce(l, name, svc, eps); deleteReason != "" {
+	if deleteReason := handler.ShouldAnnounce(l, name, svc, eps, lbIP); deleteReason != "" {
 		return c.deleteBalancer(l, name, deleteReason)
 	}
 
@@ -370,7 +370,7 @@ func (c *controller) SetNode(l log.Logger, node *v1.Node) k8s.SyncState {
 // A Protocol can advertise an IP address.
 type Protocol interface {
 	SetConfig(log.Logger, *config.Config) error
-	ShouldAnnounce(log.Logger, string, *v1.Service, k8s.EpsOrSlices) string
+	ShouldAnnounce(log.Logger, string, *v1.Service, k8s.EpsOrSlices, net.IP) string
 	SetBalancer(log.Logger, string, net.IP, *config.Pool) error
 	DeleteBalancer(log.Logger, string, string) error
 	SetNode(log.Logger, *v1.Node) error

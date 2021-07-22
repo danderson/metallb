@@ -42,45 +42,51 @@ func (c *layer2Controller) SetConfig(log.Logger, *config.Config) error {
 // The speakers parameter is a map with the node name as key and the readiness
 // status as value (true means ready, false means not ready).
 // If the speakers map is nil, it is ignored.
-func usableNodes(eps k8s.EpsOrSlices, speakers map[string]bool) []string {
+func usableNodes(isTrafficLocal bool, eps k8s.EpsOrSlices, speakers map[string]bool) []string {
 	usable := map[string]bool{}
-	switch eps.Type {
-	case k8s.Eps:
-		for _, subset := range eps.EpVal.Subsets {
-			for _, ep := range subset.Addresses {
-				if ep.NodeName == nil {
-					continue
-				}
-				if speakers != nil {
-					if ready, ok := speakers[*ep.NodeName]; !ok || !ready {
+	if isTrafficLocal {
+		switch eps.Type {
+		case k8s.Eps:
+			for _, subset := range eps.EpVal.Subsets {
+				for _, ep := range subset.Addresses {
+					if ep.NodeName == nil {
 						continue
 					}
+					if speakers != nil {
+						if ready, ok := speakers[*ep.NodeName]; !ok || !ready {
+							continue
+						}
+					}
+					if _, ok := usable[*ep.NodeName]; !ok {
+						usable[*ep.NodeName] = true
+					}
 				}
-				if _, ok := usable[*ep.NodeName]; !ok {
-					usable[*ep.NodeName] = true
+			}
+		case k8s.Slices:
+			for _, slice := range eps.SlicesVal {
+				for _, ep := range slice.Endpoints {
+					if !k8s.IsConditionReady(ep.Conditions) {
+						continue
+					}
+					nodeName := ep.Topology["kubernetes.io/hostname"]
+					if nodeName == "" {
+						continue
+					}
+					if speakers != nil {
+						if ready, ok := speakers[nodeName]; !ok || !ready {
+							continue
+						}
+					}
+					if _, ok := usable[nodeName]; !ok {
+						usable[nodeName] = true
+					}
 				}
 			}
 		}
-	case k8s.Slices:
-		for _, slice := range eps.SlicesVal {
-			for _, ep := range slice.Endpoints {
-				if !k8s.IsConditionReady(ep.Conditions) {
-					continue
-				}
-				nodeName := ep.Topology["kubernetes.io/hostname"]
-				if nodeName == "" {
-					continue
-				}
-				if speakers != nil {
-					if ready, ok := speakers[nodeName]; !ok || !ready {
-						continue
-					}
-				}
-				if _, ok := usable[nodeName]; !ok {
-					usable[nodeName] = true
-				}
-			}
-		}
+
+	} else {
+		// For non traffic local services, all nodes are usable.
+		usable = speakers
 	}
 
 	var ret []string
@@ -93,14 +99,14 @@ func usableNodes(eps k8s.EpsOrSlices, speakers map[string]bool) []string {
 	return ret
 }
 
-func (c *layer2Controller) ShouldAnnounce(l log.Logger, name string, svc *v1.Service, eps k8s.EpsOrSlices) string {
-	nodes := usableNodes(eps, c.sList.UsableSpeakers())
-	// Sort the slice by the hash of node + service name. This
-	// produces an ordering of ready nodes that is unique to this
-	// service.
+func (c *layer2Controller) ShouldAnnounce(l log.Logger, name string, svc *v1.Service, eps k8s.EpsOrSlices, lbIP net.IP) string {
+	nodes := usableNodes(svc.Spec.ExternalTrafficPolicy == v1.ServiceExternalTrafficPolicyTypeLocal, eps, c.sList.UsableSpeakers())
+	// Sort the slice by the hash of node + service IP. This
+	// produces an ordering of ready nodes that is unique to the IP
+	// so that all services sharing the same IP are annonced from the same node.
 	sort.Slice(nodes, func(i, j int) bool {
-		hi := sha256.Sum256([]byte(nodes[i] + "#" + name))
-		hj := sha256.Sum256([]byte(nodes[j] + "#" + name))
+		hi := sha256.Sum256([]byte(nodes[i] + "#" + lbIP.String()))
+		hj := sha256.Sum256([]byte(nodes[j] + "#" + lbIP.String()))
 
 		return bytes.Compare(hi[:], hj[:]) < 0
 	})
