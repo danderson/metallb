@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -74,7 +75,10 @@ func (a *Announce) updateInterfaces() {
 			continue
 		}
 		if _, err = os.Stat("/sys/class/net/" + ifi.Name + "/master"); !os.IsNotExist(err) {
-			continue
+			masterOperState, err := ioutil.ReadFile("/sys/class/net/" + ifi.Name + "/master/operstate")
+			if err == nil && strings.Contains(string(masterOperState), "up") {
+				continue
+			}
 		}
 		f, err := ioutil.ReadFile("/sys/class/net/" + ifi.Name + "/flags")
 		if err == nil {
