@@ -51,6 +51,9 @@ prometheus:
     # enable support for Prometheus Operator
     enabled: false
 
+    # option to set namespace of the prometheus instance
+    # namespace: monitoring
+
     # optional additionnal labels for podMonitors
     additionalLabels: {}
 
@@ -80,6 +83,9 @@ prometheus:
 
     # enable alertmanager alerts
     enabled: false
+
+    # option to set namespace of the prometheus instance
+    # namespace: monitoring
 
     # optional additionnal labels for prometheusRules
     additionalLabels: {}

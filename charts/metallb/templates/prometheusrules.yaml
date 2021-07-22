@@ -3,6 +3,11 @@ apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
   name: {{ template "metallb.fullname" . }}
+  {{- if .Values.prometheus.prometheusRule.namespace }}
+  namespace: {{ .Values.prometheus.prometheusRule.namespace | quote }}
+  {{- else }}
+  namespace: {{ .Release.Namespace | quote }}
+  {{- end }}
   labels:
     {{- include "metallb.labels" . | nindent 4 }}
     {{- if .Values.prometheus.prometheusRule.additionalLabels }}

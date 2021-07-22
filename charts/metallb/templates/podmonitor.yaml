@@ -3,6 +3,11 @@ apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
   name: {{ template "metallb.fullname" . }}-controller
+  {{- if .Values.prometheus.podMonitor.namespace }}
+  namespace: {{ .Values.prometheus.podMonitor.namespace | quote }}
+  {{- else }}
+  namespace: {{ .Release.Namespace | quote }}
+  {{- end }}
   labels:
     {{- include "metallb.labels" . | nindent 4 }}
     app.kubernetes.io/component: controller
@@ -37,6 +42,11 @@ apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
 metadata:
   name: {{ template "metallb.fullname" . }}-speaker
+  {{- if .Values.prometheus.podMonitor.namespace }}
+  namespace: {{ .Values.prometheus.podMonitor.namespace | quote }}
+  {{- else }}
+  namespace: {{ .Release.Namespace | quote }}
+  {{- end }}
   labels:
     {{- include "metallb.labels" . | nindent 4 }}
     app.kubernetes.io/component: speaker
